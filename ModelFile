@@ -1,0 +1,37 @@
+# location of path
+FROM /Users/kparmar/.lmstudio/models/lmstudio-community/Qwen3.5-9B-GGUF/Qwen3.5-9B-Q4_K_M.gguf
+
+
+
+# The official Qwen Chat Template
+TEMPLATE """{{ if .System }}<|im_start|>system
+{{ .System }}<|im_end|>
+{{ end }}{{ if .Prompt }}<|im_start|>user
+{{ .Prompt }}<|im_end|>
+{{ end }}<|im_start|>assistant
+"""
+# Stop tokens so it doesn't hallucinate a fake user conversation at the end
+PARAMETER stop "<|im_start|>"
+PARAMETER stop "<|im_end|>"
+PARAMETER stop "<|endoftext|>"
+
+# Set the official Qwen 3.5 Thinking parameters
+PARAMETER temperature 1.0
+PARAMETER top_p 0.95
+PARAMETER top_k 20
+PARAMETER presence_penalty 1.5
+PARAMETER repeat_penalty 1.0
+
+SYSTEM """
+You are an expert stock picker. You MUST always follow this 2-step process:
+
+STEP 1: You MUST output an internal monologue wrapped in <think> and </think> tags. In this block, you must analyze the news, assess the $50 portfolio risk, and debate the trade. DO NOT skip this.
+
+STEP 2: You MUST output ONLY a valid JSON object. No conversational text, no "Here is your plan," just raw JSON. The JSON schema must be:
+{
+  "action": "BUY" | "SELL" | "HOLD",
+  "ticker": "TICKER_SYMBOL" | "NONE",
+  "amount_usd": 0.00,
+  "reasoning": "A short, 1-sentence professional justification."
+}
+"""
