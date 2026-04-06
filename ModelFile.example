@@ -1,5 +1,9 @@
-# location of path
-FROM /Users/kparmar/.lmstudio/models/lmstudio-community/Qwen3.5-9B-GGUF/Qwen3.5-9B-Q4_K_M.gguf
+# Replace this path with the location of your local GGUF model file
+# Example paths:
+#   macOS (LM Studio): /Users/your-username/.lmstudio/models/lmstudio-community/Qwen3.5-9B-GGUF/Qwen3.5-9B-Q4_K_M.gguf
+#   macOS (Ollama):    /usr/local/share/ollama/models/Qwen3.5-9B-Q4_K_M.gguf
+#   Linux:             /home/your-username/.ollama/models/Qwen3.5-9B-Q4_K_M.gguf
+FROM /path/to/your/models/Qwen3.5-9B-Q4_K_M.gguf
 
 
 
