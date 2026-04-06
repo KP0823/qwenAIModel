@@ -150,7 +150,11 @@ with tab3:
             with col_l:
                 st.subheader("RSS Headlines")
                 for h in state.get("rss_headlines", [])[:8]:
-                    st.markdown(f"- **[{h['source']}]** {h['title']}")
+                    published = h.get("published", "")[:16] if h.get("published") else ""
+                    processed = h.get("processed_at", "")[:10] if h.get("processed_at") else ""
+                    date_info = f" `pub: {published}`" if published else ""
+                    date_info += f" `fetched: {processed}`" if processed else ""
+                    st.markdown(f"- **[{h['source']}]**{date_info} {h['title']}")
 
             with col_r:
                 st.subheader("Reddit Pulse")

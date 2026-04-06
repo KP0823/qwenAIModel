@@ -7,7 +7,7 @@ load_dotenv()
 OLLAMA_MODEL = "StockAI:latest"
 OLLAMA_ENDPOINT = "http://localhost:11434"
 OLLAMA_GENERATE_URL = f"{OLLAMA_ENDPOINT}/api/generate"
-OLLAMA_TIMEOUT = 120  # seconds — Qwen 9B on CPU can take 60-90s
+OLLAMA_TIMEOUT = 300  # seconds — full context prompt can take 2-3 min on GPU
 
 # --- Alpaca Paper Trading ---
 ALPACA_API_KEY = os.getenv("ALPACA_API_KEY")
@@ -24,7 +24,8 @@ TARGET_ETFS = ["XLK", "XLE", "XLU", "XLF", "XLV", "XLI"]
 
 # --- RSS Feeds ---
 RSS_FEEDS = {
-    "reuters_business": "https://feeds.reuters.com/reuters/businessNews",
+    "bloomberg_markets": "https://feeds.bloomberg.com/markets/news.rss",
+    "yahoo_finance": "https://finance.yahoo.com/rss/",
     "cnbc_markets": "https://www.cnbc.com/id/20910258/device/rss/rss.html",
     "cnbc_finance": "https://www.cnbc.com/id/10000664/device/rss/rss.html",
 }

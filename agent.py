@@ -35,10 +35,14 @@ def build_prompt(state: dict, portfolio: dict) -> str:
         signal = data.get("signal", "UNKNOWN")
         etf_lines.append(f"  {symbol}: {price} | RSI: {rsi} | 200MA: {ma} | Signal: {signal}")
 
-    headlines = state.get("rss_headlines", [])[:5]
-    headline_lines = [f"  - [{h['source']}] {h['title']}" for h in headlines]
+    headlines = state.get("rss_headlines", [])[:15]
+    headline_lines = []
+    for h in headlines:
+        published = f" ({h['published'][:16]})" if h.get("published") else ""
+        processed = f" [processed: {h['processed_at'][:10]}]" if h.get("processed_at") else ""
+        headline_lines.append(f"  - [{h['source']}]{published} {h['title']}{processed}")
 
-    reddit_posts = sorted(state.get("reddit_posts", []), key=lambda x: x.get("score", 0), reverse=True)[:5]
+    reddit_posts = sorted(state.get("reddit_posts", []), key=lambda x: x.get("score", 0), reverse=True)[:10]
     reddit_lines = [f"  - r/{p['subreddit']}: \"{p['title']}\" (score: {p['score']})" for p in reddit_posts]
 
     positions = portfolio.get("positions", {})

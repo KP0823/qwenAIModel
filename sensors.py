@@ -1,8 +1,8 @@
+import hashlib
 import json
 import logging
 import os
-import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import feedparser
 import praw
@@ -12,6 +12,10 @@ import yfinance as yf
 import config
 
 logger = logging.getLogger(__name__)
+
+SEEN_HEADLINES_FILE = os.path.join(config.DATA_DIR, "seen_headlines.json")
+HEADLINE_RETENTION_DAYS = 7
+HEADLINE_MAX_AGE_DAYS = 3  # reject articles older than this
 
 
 def fetch_technical_data(symbol: str) -> dict:
@@ -69,22 +73,43 @@ def fetch_technical_data(symbol: str) -> dict:
 
 
 def fetch_rss_headlines() -> list:
-    """Fetch top macro headlines from configured RSS feeds."""
+    """Fetch new macro headlines, skipping any already seen in the last 7 days."""
+    seen = _load_seen_headlines()
+    now = _now_iso()
     headlines = []
+    new_seen = {}
+
     for source, url in config.RSS_FEEDS.items():
         try:
             feed = feedparser.parse(url)
-            for entry in feed.entries[:5]:
-                headlines.append({
-                    "source": source,
-                    "title": entry.get("title", ""),
-                    "published": entry.get("published", entry.get("updated", "")),
-                })
             if not feed.entries:
                 logger.warning(f"RSS feed empty: {source}")
+                continue
+            for entry in feed.entries[:15]:
+                title = entry.get("title", "").strip()
+                if not title:
+                    continue
+                key = hashlib.md5(title.encode()).hexdigest()
+                if key in seen:
+                    continue  # already fed to the model
+                published = entry.get("published", entry.get("updated", ""))
+                pub_dt = _parse_published(published)
+                cutoff = datetime.now(timezone.utc) - timedelta(days=HEADLINE_MAX_AGE_DAYS)
+                if pub_dt and pub_dt < cutoff:
+                    continue  # article too old — skip
+                headlines.append({
+                    "source": source,
+                    "title": title,
+                    "published": published,
+                    "processed_at": now,
+                })
+                new_seen[key] = {"title": title, "processed_at": now}
         except Exception as e:
             logger.error(f"RSS fetch failed for {source}: {e}")
-    return headlines[:15]
+
+    _save_seen_headlines(seen, new_seen)
+    logger.info(f"RSS: {len(headlines)} new headlines (skipped already-seen)")
+    return headlines[:30]
 
 
 def fetch_reddit_sentiment() -> list:
@@ -102,7 +127,7 @@ def fetch_reddit_sentiment() -> list:
         for sub_name in config.REDDIT_SUBREDDITS:
             try:
                 subreddit = reddit.subreddit(sub_name)
-                for submission in subreddit.hot(limit=10):
+                for submission in subreddit.hot(limit=20):
                     posts.append({
                         "subreddit": sub_name,
                         "title": submission.title,
@@ -113,6 +138,43 @@ def fetch_reddit_sentiment() -> list:
     except Exception as e:
         logger.error(f"Reddit init failed: {e}")
     return posts
+
+
+def _parse_published(date_str: str):
+    """Try to parse an RSS date string into a UTC datetime. Returns None on failure."""
+    if not date_str:
+        return None
+    import email.utils
+    try:
+        parsed = email.utils.parsedate_to_datetime(date_str)
+        return parsed.astimezone(timezone.utc)
+    except Exception:
+        pass
+    for fmt in ("%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(date_str[:19], fmt).replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+    return None
+
+
+def _load_seen_headlines() -> dict:
+    """Load seen headline hashes, pruning entries older than HEADLINE_RETENTION_DAYS."""
+    try:
+        with open(SEEN_HEADLINES_FILE) as f:
+            seen = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=HEADLINE_RETENTION_DAYS)).isoformat()
+    return {k: v for k, v in seen.items() if v.get("processed_at", "") >= cutoff}
+
+
+def _save_seen_headlines(existing: dict, new_entries: dict) -> None:
+    existing.update(new_entries)
+    tmp = SEEN_HEADLINES_FILE + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(existing, f, indent=2)
+    os.replace(tmp, SEEN_HEADLINES_FILE)
 
 
 def _check_ollama_health() -> str:
