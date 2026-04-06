@@ -1,10 +1,13 @@
 import csv
+import json
 import logging
 import os
 import time
 from datetime import datetime, timezone
 
 import config
+
+PENDING_STOPS_FILE = os.path.join(config.DATA_DIR, "pending_stops.json")
 
 logger = logging.getLogger(__name__)
 
@@ -102,7 +105,8 @@ def attach_trailing_stop(order_id: str, symbol: str, trail_percent: float = None
         time.sleep(2)
 
     if filled_qty is None or filled_qty <= 0:
-        logger.warning(f"Order {order_id} did not fill within 30s — trailing stop not attached")
+        logger.warning(f"Order {order_id} did not fill within 30s — saving to pending_stops.json for next run")
+        _save_pending_stop(order_id, symbol, trail_percent)
         return
 
     stop_request = TrailingStopOrderRequest(
@@ -114,6 +118,68 @@ def attach_trailing_stop(order_id: str, symbol: str, trail_percent: float = None
     )
     stop_order = client.submit_order(stop_request)
     logger.info(f"Trailing stop attached for {symbol}: {trail_percent}% — stop order id: {stop_order.id}")
+
+
+def _save_pending_stop(order_id: str, symbol: str, trail_percent: float) -> None:
+    """Persist an unfilled order so the next pipeline run can attach the trailing stop."""
+    pending = _load_pending_stops()
+    pending[order_id] = {"symbol": symbol, "trail_percent": trail_percent}
+    with open(PENDING_STOPS_FILE, "w") as f:
+        json.dump(pending, f, indent=2)
+
+
+def _load_pending_stops() -> dict:
+    try:
+        with open(PENDING_STOPS_FILE) as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def process_pending_stops() -> None:
+    """
+    Called at the start of each pipeline run.
+    Checks every saved pending order — if it has filled, attaches the trailing stop and removes it from the list.
+    """
+    from alpaca.trading.requests import TrailingStopOrderRequest
+    from alpaca.trading.enums import OrderSide, TimeInForce
+
+    pending = _load_pending_stops()
+    if not pending:
+        return
+
+    client = _get_client()
+    resolved = []
+
+    for order_id, meta in pending.items():
+        try:
+            order = client.get_order_by_id(order_id)
+            status = str(order.status)
+            if status in ("filled", "OrderStatus.FILLED"):
+                filled_qty = float(order.filled_qty)
+                stop_request = TrailingStopOrderRequest(
+                    symbol=meta["symbol"],
+                    qty=filled_qty,
+                    side=OrderSide.SELL,
+                    trail_percent=meta["trail_percent"],
+                    time_in_force=TimeInForce.GTC,
+                )
+                client.submit_order(stop_request)
+                logger.info(f"Pending trailing stop attached for {meta['symbol']} (order {order_id})")
+                resolved.append(order_id)
+            elif status in ("canceled", "OrderStatus.CANCELED", "expired", "OrderStatus.EXPIRED"):
+                logger.warning(f"Pending order {order_id} was {status} — removing from pending stops")
+                resolved.append(order_id)
+            else:
+                logger.info(f"Pending order {order_id} still {status} — will retry next run")
+        except Exception as e:
+            logger.error(f"Failed to process pending stop for order {order_id}: {e}")
+
+    for order_id in resolved:
+        pending.pop(order_id, None)
+
+    with open(PENDING_STOPS_FILE, "w") as f:
+        json.dump(pending, f, indent=2)
 
 
 def update_portfolio_history() -> None:

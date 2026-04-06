@@ -271,6 +271,12 @@ CURRENT ETF DATA:
 def run() -> None:
     logger.info("Agent: starting decision cycle")
 
+    # Attach any trailing stops that couldn't be placed last run (e.g. market was closed)
+    try:
+        broker.process_pending_stops()
+    except Exception as e:
+        logger.error(f"Pending stops processing failed: {e}")
+
     # Load sensor data
     state = _load_json(config.SYSTEM_STATE_FILE, {})
     if not state:

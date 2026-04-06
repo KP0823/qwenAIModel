@@ -97,6 +97,38 @@ pip install -r requirements.txt
 python3 main.py
 ```
 
+### ModelFile Setup
+
+The model configuration is not committed to this repo since it contains a local file path. A template is provided:
+
+```bash
+cp ModelFile.example ModelFile
+```
+
+Then open `ModelFile` and update the `FROM` line to point to your local GGUF model:
+
+```
+FROM /path/to/your/models/Qwen3.5-9B-Q4_K_M.gguf
+```
+
+Common locations:
+- **LM Studio (macOS):** `~/.lmstudio/models/lmstudio-community/Qwen3.5-9B-GGUF/Qwen3.5-9B-Q4_K_M.gguf`
+- **Ollama default (macOS):** `~/.ollama/models/blobs/<model-blob>`
+- **Linux:** `~/.ollama/models/...`
+
+Once updated, register the model with Ollama:
+
+```bash
+ollama create StockAI -f ModelFile
+```
+
+Verify it's loaded:
+
+```bash
+ollama list
+# Should show: StockAI:latest
+```
+
 ---
 
 ## Usage
@@ -112,9 +144,48 @@ tail -f logs/agent.log
 streamlit run dashboard.py
 ```
 
-### Daily Cron (9:00 AM EST, Mon–Fri)
+### Automated Scheduling (9:00 AM, Mon–Fri)
+
+The agent runs via **macOS launchd** rather than cron. launchd is the macOS-native scheduler and supports `WakeForNetworkAccess`, which wakes the machine from sleep to ensure the job always fires — something cron cannot do.
+
+Create a plist at `~/Library/LaunchAgents/com.yourname.macroagent.plist`:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.yourname.macroagent</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/path/to/venv/bin/python</string>
+        <string>/path/to/qwenAIModel/main.py</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/path/to/qwenAIModel</string>
+    <key>StandardOutPath</key>
+    <string>/path/to/qwenAIModel/logs/cron.log</string>
+    <key>StandardErrorPath</key>
+    <string>/path/to/qwenAIModel/logs/cron.log</string>
+    <key>StartCalendarInterval</key>
+    <array>
+        <dict><key>Weekday</key><integer>1</integer><key>Hour</key><integer>9</integer><key>Minute</key><integer>0</integer></dict>
+        <dict><key>Weekday</key><integer>2</integer><key>Hour</key><integer>9</integer><key>Minute</key><integer>0</integer></dict>
+        <dict><key>Weekday</key><integer>3</integer><key>Hour</key><integer>9</integer><key>Minute</key><integer>0</integer></dict>
+        <dict><key>Weekday</key><integer>4</integer><key>Hour</key><integer>9</integer><key>Minute</key><integer>0</integer></dict>
+        <dict><key>Weekday</key><integer>5</integer><key>Hour</key><integer>9</integer><key>Minute</key><integer>0</integer></dict>
+    </array>
+    <key>WakeForNetworkAccess</key>
+    <true/>
+</dict>
+</plist>
 ```
-0 14 * * 1-5 cd /path/to/qwenAIModel && /path/to/venv/bin/python main.py >> logs/cron.log 2>&1
+
+Then register it:
+
+```bash
+launchctl load ~/Library/LaunchAgents/com.yourname.macroagent.plist
 ```
 
 ---
@@ -149,12 +220,12 @@ Auto-refreshes every 60 seconds.
 
 ```
 qwenAIModel/
-├── ModelFile               # Ollama model config — CoT + JSON output format
+├── ModelFile.example       # Ollama model config template — copy to ModelFile and update the FROM path
 ├── config.py               # Central constants hub (all modules import from here)
 ├── sensors.py              # Data pipeline: yfinance, RSS, Reddit → system_state.json
 ├── broker.py               # Alpaca paper trading: orders, trailing stops, portfolio history
 ├── agent.py                # AI brain: prompt builder, Ollama caller, parser, safety gates
-├── main.py                 # Cron entry point: initializes files, runs sensors → agent
+├── main.py                 # Entry point: initializes files, runs sensors → agent
 ├── dashboard.py            # Streamlit observability dashboard
 ├── requirements.txt        # Python dependencies
 ├── .env                    # API secrets (gitignored)
