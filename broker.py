@@ -40,6 +40,10 @@ def get_portfolio_value() -> dict:
             "qty": float(pos.qty),
             "market_value": float(pos.market_value),
             "current_price": float(pos.current_price),
+            "avg_entry_price": float(pos.avg_entry_price),
+            "cost_basis": float(pos.cost_basis),
+            "unrealized_pl": float(pos.unrealized_pl),
+            "unrealized_plpc": float(pos.unrealized_plpc) * 100,  # convert to %
         }
 
     return {"total_value": total_value, "cash": cash, "positions": positions}
@@ -114,7 +118,7 @@ def attach_trailing_stop(order_id: str, symbol: str, trail_percent: float = None
         qty=filled_qty,
         side=OrderSide.SELL,
         trail_percent=trail_percent,
-        time_in_force=TimeInForce.GTC,
+        time_in_force=TimeInForce.DAY,
     )
     stop_order = client.submit_order(stop_request)
     logger.info(f"Trailing stop attached for {symbol}: {trail_percent}% — stop order id: {stop_order.id}")
@@ -162,7 +166,7 @@ def process_pending_stops() -> None:
                     qty=filled_qty,
                     side=OrderSide.SELL,
                     trail_percent=meta["trail_percent"],
-                    time_in_force=TimeInForce.GTC,
+                    time_in_force=TimeInForce.DAY,
                 )
                 client.submit_order(stop_request)
                 logger.info(f"Pending trailing stop attached for {meta['symbol']} (order {order_id})")
@@ -185,7 +189,7 @@ def process_pending_stops() -> None:
 def update_portfolio_history() -> None:
     """Append today's portfolio snapshot to portfolio_history.csv."""
     portfolio = get_portfolio_value()
-    date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
     holdings = ",".join(portfolio["positions"].keys()) if portfolio["positions"] else "CASH"
 
     file_exists = os.path.exists(config.PORTFOLIO_HISTORY_FILE)

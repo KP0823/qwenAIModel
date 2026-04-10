@@ -20,7 +20,7 @@ REDDIT_CLIENT_SECRET = os.getenv("REDDIT_CLIENT_SECRET")
 REDDIT_USER_AGENT = os.getenv("REDDIT_USER_AGENT", "MacroAgent/1.0")
 
 # --- Target ETFs ---
-TARGET_ETFS = ["XLK", "XLE", "XLU", "XLF", "XLV", "XLI"]
+TARGET_ETFS = ["XLK", "XLE", "XLU", "XLF", "XLV", "XLI", "GAL", "TOTL", "SRLN", "RLY"]
 
 # --- RSS Feeds ---
 RSS_FEEDS = {
@@ -30,15 +30,26 @@ RSS_FEEDS = {
     "cnbc_finance": "https://www.cnbc.com/id/10000664/device/rss/rss.html",
 }
 
+# --- Alpha Vantage ---
+ALPHA_VANTAGE_API_KEY = os.getenv("ALPHA_VANTAGE_API_KEY")
+ALPHA_VANTAGE_NEWS_URL = "https://www.alphavantage.co/query"
+
+# --- NewsAPI ---
+NEWS_API_KEY = os.getenv("NEWS_API_KEY")
+NEWSAPI_URL = "https://newsapi.org/v2/top-headlines"
+
 # --- Reddit Subreddits ---
 REDDIT_SUBREDDITS = ["investing", "stocks", "economics"]
 
 # --- Risk Parameters ---
 CIRCUIT_BREAKER_PCT = 0.05   # halt trading if portfolio drops >5% in one day
-PDT_MAX_DAY_TRADES = 3       # max non-HOLD actions in rolling window (conservative PDT proxy)
+PDT_MAX_DAY_TRADES = 6       # max non-HOLD actions in rolling window (relaxed for hourly runs)
 PDT_ROLLING_DAYS = 5
 TRAILING_STOP_PCT = 10.0     # trailing stop percentage attached to every BUY
-MAX_PORTFOLIO_USD = 50.0     # paper portfolio cap
+MAX_PORTFOLIO_USD = 100_000.0  # paper account default — change to 50.0 when switching to live $50 account
+
+# --- Market Hours (ET) ---
+MARKET_RUN_HOURS = [10, 11, 12, 13, 14, 15]  # ET hours to run pipeline
 
 # --- File Paths ---
 _BASE = os.path.dirname(os.path.abspath(__file__))

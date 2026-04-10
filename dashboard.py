@@ -29,16 +29,17 @@ with tab1:
                 title="Portfolio Equity Over Time",
             )
             fig_equity.update_traces(line_color="#00c896")
-            fig_equity.add_hline(y=50.0, line_dash="dot", line_color="gray",
-                                 annotation_text="Starting $50")
+            start = config.MAX_PORTFOLIO_USD
+            fig_equity.add_hline(y=start, line_dash="dot", line_color="gray",
+                                 annotation_text=f"Starting ${start:,.0f}")
             st.plotly_chart(fig_equity, use_container_width=True)
 
             latest = df.iloc[-1]
             col1, col2, col3 = st.columns(3)
-            col1.metric("Total Value", f"${float(latest['total_value']):.2f}")
-            col2.metric("Cash", f"${float(latest['cash']):.2f}")
-            pnl = float(latest["total_value"]) - 50.0
-            col3.metric("P&L vs $50 Start", f"${pnl:+.2f}")
+            col1.metric("Total Value", f"${float(latest['total_value']):,.2f}")
+            col2.metric("Cash", f"${float(latest['cash']):,.2f}")
+            pnl = float(latest["total_value"]) - start
+            col3.metric(f"P&L vs ${start:,.0f} Start", f"${pnl:+.2f}")
         else:
             st.info("No portfolio history yet. Run the pipeline first.")
     else:
@@ -47,18 +48,55 @@ with tab1:
     st.subheader("Current Allocation")
     try:
         import broker
-        positions = broker.get_positions()
-        if positions:
-            labels = list(positions.keys())
-            values = [p["market_value"] for p in positions.values()]
-            fig_donut = go.Figure(data=[go.Pie(
-                labels=labels, values=values, hole=0.45,
+        portfolio = broker.get_portfolio_value()
+        positions = portfolio["positions"]
+        cash = portfolio["cash"]
+        total_etf = sum(p["market_value"] for p in positions.values())
+
+        col_etf, col_cash = st.columns(2)
+
+        with col_etf:
+            if positions:
+                fig_etf = go.Figure(data=[go.Pie(
+                    labels=list(positions.keys()),
+                    values=[p["market_value"] for p in positions.values()],
+                    hole=0.45,
+                    textinfo="label+percent",
+                )])
+                fig_etf.update_layout(title="ETF Breakdown (Live)", showlegend=True)
+                st.plotly_chart(fig_etf, use_container_width=True)
+            else:
+                st.info("No open ETF positions.")
+
+        with col_cash:
+            fig_cash = go.Figure(data=[go.Pie(
+                labels=["Cash", "ETF Holdings"],
+                values=[cash, total_etf if total_etf > 0 else 0.01],
+                hole=0.45,
                 textinfo="label+percent",
+                marker_colors=["#636EFA", "#00c896"],
             )])
-            fig_donut.update_layout(title="ETF Allocation (Live)", showlegend=True)
-            st.plotly_chart(fig_donut, use_container_width=True)
-        else:
-            st.info("No open positions — fully in cash.")
+            fig_cash.update_layout(title="Cash vs ETF Holdings", showlegend=True)
+            st.plotly_chart(fig_cash, use_container_width=True)
+
+        # Positions table
+        if positions:
+            st.subheader("Open Positions")
+            rows = []
+            for sym, p in positions.items():
+                pl_color = "🟢" if p["unrealized_pl"] >= 0 else "🔴"
+                rows.append({
+                    "ETF": sym,
+                    "Shares": round(p["qty"], 6),
+                    "Avg Entry": f"${p['avg_entry_price']:.2f}",
+                    "Current Price": f"${p['current_price']:.2f}",
+                    "Cost Basis": f"${p['cost_basis']:.2f}",
+                    "Market Value": f"${p['market_value']:.2f}",
+                    "Unrealized P&L": f"{pl_color} ${p['unrealized_pl']:+.2f}",
+                    "% Gain/Loss": f"{p['unrealized_plpc']:+.2f}%",
+                })
+            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
     except Exception as e:
         st.warning(f"Could not fetch live positions from Alpaca: {e}")
         st.info("Showing last known state from portfolio_history.csv")
@@ -79,13 +117,25 @@ with tab2:
 
         if trades:
             action_colors = {"BUY": "🟢", "SELL": "🔴", "HOLD": "🟡"}
+            # Group by batch_id for display
+            seen_batches = set()
             for trade in reversed(trades):
                 ts = trade.get("timestamp", "")[:19].replace("T", " ")
                 action = trade.get("action", "?")
                 ticker = trade.get("ticker", "?")
                 amount = trade.get("amount_usd", 0.0)
+                batch = trade.get("batch_id", "")
                 icon = action_colors.get(action, "⚪")
-                label = f"{icon} {ts} | **{action}** {ticker} ${amount:.2f}"
+
+                # Show batch indicator for multi-action batches
+                batch_tag = ""
+                if batch and batch not in seen_batches:
+                    batch_trades = [t for t in trades if t.get("batch_id") == batch]
+                    if len(batch_trades) > 1:
+                        batch_tag = f" [batch {batch}: {len(batch_trades)} actions]"
+                    seen_batches.add(batch)
+
+                label = f"{icon} {ts} | **{action}** {ticker} ${amount:.2f}{batch_tag}"
 
                 with st.expander(label):
                     st.markdown(f"**Reasoning:** {trade.get('reasoning', 'N/A')}")
@@ -145,9 +195,9 @@ with tab3:
             if etf_rows:
                 st.dataframe(pd.DataFrame(etf_rows), use_container_width=True, hide_index=True)
 
-            # Headlines
-            col_l, col_r = st.columns(2)
-            with col_l:
+            # Headlines — 2x2 grid
+            col_tl, col_tr = st.columns(2)
+            with col_tl:
                 st.subheader("RSS Headlines")
                 for h in state.get("rss_headlines", [])[:8]:
                     published = h.get("published", "")[:16] if h.get("published") else ""
@@ -156,11 +206,35 @@ with tab3:
                     date_info += f" `fetched: {processed}`" if processed else ""
                     st.markdown(f"- **[{h['source']}]**{date_info} {h['title']}")
 
-            with col_r:
+            with col_tr:
+                st.subheader("Alpha Vantage News")
+                for a in state.get("alphavantage_news", [])[:8]:
+                    sentiment = a.get("sentiment", "")
+                    s_icon = {"Bullish": "🟢", "Somewhat-Bullish": "🟢", "Bearish": "🔴",
+                              "Somewhat-Bearish": "🔴"}.get(sentiment, "⚪")
+                    tickers = ", ".join(a.get("tickers", [])) if a.get("tickers") else ""
+                    ticker_tag = f" `{tickers}`" if tickers else ""
+                    st.markdown(f"- {s_icon} **[{a['source']}]**{ticker_tag} {a['title']}")
+                if not state.get("alphavantage_news"):
+                    st.info("No Alpha Vantage data. Set ALPHA_VANTAGE_API_KEY in .env")
+
+            col_bl, col_br = st.columns(2)
+            with col_bl:
+                st.subheader("NewsAPI Headlines")
+                for n in state.get("newsapi_headlines", [])[:8]:
+                    published = n.get("published", "")[:16] if n.get("published") else ""
+                    date_info = f" `{published}`" if published else ""
+                    st.markdown(f"- **[{n['source']}]**{date_info} {n['title']}")
+                if not state.get("newsapi_headlines"):
+                    st.info("No NewsAPI data. Set NEWS_API_KEY in .env")
+
+            with col_br:
                 st.subheader("Reddit Pulse")
                 posts = sorted(state.get("reddit_posts", []), key=lambda x: x.get("score", 0), reverse=True)[:8]
                 for p in posts:
                     st.markdown(f"- **r/{p['subreddit']}** (↑{p['score']}) {p['title']}")
+                if not posts:
+                    st.info("No Reddit data. Awaiting API approval.")
         else:
             st.info("No sensor data yet. Run main.py to populate.")
     else:

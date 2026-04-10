@@ -112,6 +112,114 @@ def fetch_rss_headlines() -> list:
     return headlines[:30]
 
 
+def fetch_alphavantage_news() -> list:
+    """Fetch ticker-specific news sentiment from Alpha Vantage (free tier: 25 req/day)."""
+    if not config.ALPHA_VANTAGE_API_KEY:
+        logger.warning("Alpha Vantage API key not set — skipping")
+        return []
+
+    seen = _load_seen_headlines()
+    now = _now_iso()
+    articles = []
+    new_seen = {}
+
+    tickers = ",".join(config.TARGET_ETFS)
+    try:
+        r = requests.get(
+            config.ALPHA_VANTAGE_NEWS_URL,
+            params={"function": "NEWS_SENTIMENT", "tickers": tickers, "apikey": config.ALPHA_VANTAGE_API_KEY},
+            timeout=15,
+        )
+        r.raise_for_status()
+        data = r.json()
+        for item in data.get("feed", [])[:20]:
+            title = item.get("title", "").strip()
+            if not title:
+                continue
+            key = hashlib.md5(title.encode()).hexdigest()
+            if key in seen:
+                continue
+            pub = item.get("time_published", "")
+            pub_dt = _parse_av_date(pub)
+            cutoff = datetime.now(timezone.utc) - timedelta(days=HEADLINE_MAX_AGE_DAYS)
+            if pub_dt and pub_dt < cutoff:
+                continue
+            sentiment = item.get("overall_sentiment_label", "Neutral")
+            relevant_tickers = [t["ticker"] for t in item.get("ticker_sentiment", [])
+                                if t.get("ticker") in config.TARGET_ETFS]
+            articles.append({
+                "source": item.get("source", "AlphaVantage"),
+                "title": title,
+                "published": pub,
+                "sentiment": sentiment,
+                "tickers": relevant_tickers,
+                "processed_at": now,
+            })
+            new_seen[key] = {"title": title, "processed_at": now}
+    except Exception as e:
+        logger.error(f"Alpha Vantage news fetch failed: {e}")
+
+    _save_seen_headlines(_load_seen_headlines(), new_seen)
+    logger.info(f"Alpha Vantage: {len(articles)} new articles")
+    return articles[:15]
+
+
+def _parse_av_date(date_str: str):
+    """Parse Alpha Vantage date format (20260406T120000) to datetime."""
+    if not date_str:
+        return None
+    try:
+        return datetime.strptime(date_str[:15], "%Y%m%dT%H%M%S").replace(tzinfo=timezone.utc)
+    except (ValueError, IndexError):
+        return None
+
+
+def fetch_newsapi_headlines() -> list:
+    """Fetch top business headlines from NewsAPI (free tier: 100 req/day)."""
+    if not config.NEWS_API_KEY:
+        logger.warning("NewsAPI key not set — skipping")
+        return []
+
+    seen = _load_seen_headlines()
+    now = _now_iso()
+    headlines = []
+    new_seen = {}
+
+    try:
+        r = requests.get(
+            config.NEWSAPI_URL,
+            params={"category": "business", "country": "us", "pageSize": 15, "apiKey": config.NEWS_API_KEY},
+            timeout=15,
+        )
+        r.raise_for_status()
+        data = r.json()
+        for item in data.get("articles", []):
+            title = item.get("title", "").strip()
+            if not title or title == "[Removed]":
+                continue
+            key = hashlib.md5(title.encode()).hexdigest()
+            if key in seen:
+                continue
+            published = item.get("publishedAt", "")
+            pub_dt = _parse_published(published)
+            cutoff = datetime.now(timezone.utc) - timedelta(days=HEADLINE_MAX_AGE_DAYS)
+            if pub_dt and pub_dt < cutoff:
+                continue
+            headlines.append({
+                "source": item.get("source", {}).get("name", "NewsAPI"),
+                "title": title,
+                "published": published,
+                "processed_at": now,
+            })
+            new_seen[key] = {"title": title, "processed_at": now}
+    except Exception as e:
+        logger.error(f"NewsAPI fetch failed: {e}")
+
+    _save_seen_headlines(_load_seen_headlines(), new_seen)
+    logger.info(f"NewsAPI: {len(headlines)} new headlines")
+    return headlines[:15]
+
+
 def fetch_reddit_sentiment() -> list:
     """Fetch top posts from financial subreddits."""
     if not config.REDDIT_CLIENT_ID or not config.REDDIT_CLIENT_SECRET:
@@ -226,6 +334,12 @@ def run() -> dict:
     headlines = fetch_rss_headlines()
     rss_ok = "ok" if headlines else "partial"
 
+    av_news = fetch_alphavantage_news()
+    av_ok = "ok" if av_news else "partial"
+
+    newsapi_headlines = fetch_newsapi_headlines()
+    newsapi_ok = "ok" if newsapi_headlines else "partial"
+
     reddit_posts = fetch_reddit_sentiment()
     reddit_ok = "ok" if reddit_posts else "partial"
 
@@ -233,10 +347,14 @@ def run() -> dict:
         "last_sync": _now_iso(),
         "etf_data": etf_data,
         "rss_headlines": headlines,
+        "alphavantage_news": av_news,
+        "newsapi_headlines": newsapi_headlines,
         "reddit_posts": reddit_posts,
         "api_health": {
             "yfinance": "ok" if yfinance_ok else "partial",
             "rss": rss_ok,
+            "alphavantage": av_ok,
+            "newsapi": newsapi_ok,
             "reddit": reddit_ok,
             "ollama": _check_ollama_health(),
             "alpaca": _check_alpaca_health(),

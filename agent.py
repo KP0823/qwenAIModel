@@ -42,6 +42,18 @@ def build_prompt(state: dict, portfolio: dict) -> str:
         processed = f" [processed: {h['processed_at'][:10]}]" if h.get("processed_at") else ""
         headline_lines.append(f"  - [{h['source']}]{published} {h['title']}{processed}")
 
+    av_news = state.get("alphavantage_news", [])[:10]
+    av_lines = []
+    for a in av_news:
+        tickers_str = ", ".join(a.get("tickers", [])) if a.get("tickers") else "general"
+        av_lines.append(f"  - [{a['source']}] \"{a['title']}\" (sentiment: {a.get('sentiment', 'N/A')}, tickers: {tickers_str})")
+
+    newsapi = state.get("newsapi_headlines", [])[:10]
+    newsapi_lines = []
+    for n in newsapi:
+        pub = f" ({n['published'][:16]})" if n.get("published") else ""
+        newsapi_lines.append(f"  - [{n['source']}]{pub} {n['title']}")
+
     reddit_posts = sorted(state.get("reddit_posts", []), key=lambda x: x.get("score", 0), reverse=True)[:10]
     reddit_lines = [f"  - r/{p['subreddit']}: \"{p['title']}\" (score: {p['score']})" for p in reddit_posts]
 
@@ -71,8 +83,14 @@ def build_prompt(state: dict, portfolio: dict) -> str:
 ETF TECHNICAL SNAPSHOT:
 {chr(10).join(etf_lines)}
 
-MACRO HEADLINES:
+MACRO HEADLINES (RSS):
 {chr(10).join(headline_lines) if headline_lines else "  No headlines available"}
+
+ALPHA VANTAGE NEWS SENTIMENT:
+{chr(10).join(av_lines) if av_lines else "  No Alpha Vantage data available"}
+
+NEWSAPI HEADLINES:
+{chr(10).join(newsapi_lines) if newsapi_lines else "  No NewsAPI data available"}
 
 REDDIT PULSE:
 {chr(10).join(reddit_lines) if reddit_lines else "  No Reddit data available"}
@@ -89,7 +107,8 @@ Open Positions:
 {macro if macro else "No macro outlook yet — this may be the first run."}
 
 === DECISION REQUIRED ===
-Based on the above data, what is your single best trade action for today?
+Based on the above data, output your trade actions as a JSON array (1-3 actions).
+You may BUY/SELL multiple ETFs in one response. Output HOLD alone if no trade is justified.
 Remember: it is disciplined and correct to output HOLD if conditions do not justify a trade."""
 
     return prompt
@@ -114,16 +133,56 @@ def call_ollama(prompt: str) -> str:
 # Response Parser
 # ---------------------------------------------------------------------------
 
+def _validate_decision(decision: dict) -> bool:
+    """Validate a single decision dict. Returns True if valid."""
+    required = {"action", "ticker", "amount_usd", "reasoning"}
+    if not required.issubset(decision.keys()):
+        logger.error(f"JSON missing fields: {required - decision.keys()}")
+        return False
+    if decision["action"] not in ("BUY", "SELL", "HOLD"):
+        logger.error(f"Invalid action: {decision['action']}")
+        return False
+    try:
+        decision["amount_usd"] = float(decision["amount_usd"])
+    except (TypeError, ValueError):
+        logger.error(f"Invalid amount_usd: {decision['amount_usd']}")
+        return False
+    if not (0 <= decision["amount_usd"] <= config.MAX_PORTFOLIO_USD):
+        logger.warning(f"amount_usd {decision['amount_usd']} out of bounds — clamping")
+        decision["amount_usd"] = max(0.0, min(decision["amount_usd"], config.MAX_PORTFOLIO_USD))
+    return True
+
+
 def parse_response(raw: str) -> tuple:
     """
-    Extract (<think> block, decision dict) from raw Ollama output.
+    Extract (<think> block, list of decision dicts) from raw Ollama output.
+    Supports both JSON array and single JSON object (wrapped in list).
     Returns (think_text, None) if JSON validation fails.
     """
     # Extract think block
     think_match = re.search(r"<think>(.*?)</think>", raw, re.DOTALL)
     think_text = think_match.group(1).strip() if think_match else ""
 
-    # Extract JSON — look for a block containing "action"
+    # Try JSON array first (multi-action)
+    array_match = re.search(r"\[[\s\S]*?\]", raw)
+    if array_match:
+        try:
+            parsed = json.loads(array_match.group(0))
+            if isinstance(parsed, list) and parsed and all(isinstance(d, dict) and "action" in d for d in parsed):
+                decisions = parsed[:3]  # cap at 3
+                valid = all(_validate_decision(d) for d in decisions)
+                if valid:
+                    # If any action is HOLD, cancel all — return HOLD only
+                    if any(d["action"] == "HOLD" for d in decisions):
+                        hold = decisions[0] if decisions[0]["action"] == "HOLD" else {
+                            "action": "HOLD", "ticker": "NONE", "amount_usd": 0.0,
+                            "reasoning": "HOLD in batch cancels all actions"}
+                        return think_text, [hold]
+                    return think_text, decisions
+        except (json.JSONDecodeError, TypeError):
+            pass  # fall through to single-object extraction
+
+    # Fallback: single JSON object containing "action"
     json_match = re.search(r"\{[^{}]*\"action\"[^{}]*\}", raw, re.DOTALL)
     if not json_match:
         logger.error(f"No JSON found in response. Raw (first 500 chars): {raw[:500]}")
@@ -135,40 +194,24 @@ def parse_response(raw: str) -> tuple:
         logger.error(f"JSON parse failed: {e}. Raw match: {json_match.group(0)}")
         return think_text, None
 
-    # Validate required fields
-    required = {"action", "ticker", "amount_usd", "reasoning"}
-    if not required.issubset(decision.keys()):
-        missing = required - decision.keys()
-        logger.error(f"JSON missing fields: {missing}")
+    if not _validate_decision(decision):
         return think_text, None
 
-    if decision["action"] not in ("BUY", "SELL", "HOLD"):
-        logger.error(f"Invalid action: {decision['action']}")
-        return think_text, None
-
-    try:
-        decision["amount_usd"] = float(decision["amount_usd"])
-    except (TypeError, ValueError):
-        logger.error(f"Invalid amount_usd: {decision['amount_usd']}")
-        return think_text, None
-
-    if not (0 <= decision["amount_usd"] <= config.MAX_PORTFOLIO_USD):
-        logger.warning(f"amount_usd {decision['amount_usd']} out of bounds — clamping")
-        decision["amount_usd"] = max(0.0, min(decision["amount_usd"], config.MAX_PORTFOLIO_USD))
-
-    return think_text, decision
+    return think_text, [decision]
 
 
 # ---------------------------------------------------------------------------
 # Safety Guardrails
 # ---------------------------------------------------------------------------
 
-def check_safety_gates(decision: dict, portfolio: dict) -> tuple:
+def check_safety_gates(decisions: list, portfolio: dict) -> tuple:
     """
-    Returns (safe_decision, safety_note).
+    Accepts a list of decision dicts. Returns (safe_decisions_list, safety_note).
     safety_note: "none" | "circuit_breaker" | "pdt" | "amount_reduced" | "halt"
     """
     import csv
+
+    hold_all = lambda reason, note: ([{"action": "HOLD", "ticker": "NONE", "amount_usd": 0.0, "reasoning": reason}], note)
 
     # 1. Circuit breaker: compare today's value to yesterday's close
     try:
@@ -181,42 +224,44 @@ def check_safety_gates(decision: dict, portfolio: dict) -> tuple:
                 drop_pct = (yesterday_value - current_value) / yesterday_value
                 if drop_pct >= config.CIRCUIT_BREAKER_PCT:
                     logger.warning(f"CIRCUIT BREAKER triggered: drop={drop_pct:.1%}")
-                    decision = {**decision, "action": "HOLD", "ticker": "NONE", "amount_usd": 0.0,
-                                "reasoning": f"Circuit breaker: portfolio dropped {drop_pct:.1%} today."}
-                    return decision, "halt"
+                    return hold_all(f"Circuit breaker: portfolio dropped {drop_pct:.1%} today.", "halt")
     except Exception as e:
         logger.error(f"Circuit breaker check failed: {e}")
 
-    if decision["action"] == "HOLD":
-        return decision, "none"
+    # If entire batch is HOLD, pass through
+    if all(d["action"] == "HOLD" for d in decisions):
+        return decisions, "none"
 
-    # 2. PDT check: count non-HOLD trades in last PDT_ROLLING_DAYS days
+    # 2. PDT check: count existing trades + new batch against limit
     try:
         journal = _load_json(config.TRADE_JOURNAL_FILE, [])
         cutoff = datetime.now(timezone.utc) - timedelta(days=config.PDT_ROLLING_DAYS)
-        recent_trades = [
+        existing_trades = len([
             e for e in journal
             if e.get("action") in ("BUY", "SELL")
             and _parse_iso(e.get("timestamp", "")) >= cutoff
-        ]
-        if len(recent_trades) >= config.PDT_MAX_DAY_TRADES:
-            logger.warning(f"PDT limit reached: {len(recent_trades)} trades in last {config.PDT_ROLLING_DAYS} days")
-            decision = {**decision, "action": "HOLD", "ticker": "NONE", "amount_usd": 0.0,
-                        "reasoning": f"PDT guardrail: {len(recent_trades)} trades already executed in rolling window."}
-            return decision, "pdt"
+        ])
+        new_trades = len([d for d in decisions if d["action"] in ("BUY", "SELL")])
+        if existing_trades + new_trades > config.PDT_MAX_DAY_TRADES:
+            logger.warning(f"PDT limit: {existing_trades} existing + {new_trades} new > {config.PDT_MAX_DAY_TRADES}")
+            return hold_all(f"PDT guardrail: {existing_trades}+{new_trades} trades exceed rolling window limit.", "pdt")
     except Exception as e:
         logger.error(f"PDT check failed: {e}")
 
-    # 3. Amount cap for BUY
-    if decision["action"] == "BUY":
-        cash = portfolio["cash"]
-        if decision["amount_usd"] > cash:
-            new_amount = round(cash * 0.95, 2)
-            logger.warning(f"BUY amount ${decision['amount_usd']:.2f} exceeds cash ${cash:.2f} — reducing to ${new_amount:.2f}")
-            decision = {**decision, "amount_usd": new_amount}
-            return decision, "amount_reduced"
+    # 3. Amount cap: total BUY amounts must not exceed cash
+    safety_note = "none"
+    total_buy = sum(d["amount_usd"] for d in decisions if d["action"] == "BUY")
+    cash = portfolio["cash"]
+    if total_buy > cash:
+        safe_cash = cash * 0.95
+        scale = safe_cash / total_buy if total_buy > 0 else 0
+        for d in decisions:
+            if d["action"] == "BUY":
+                d["amount_usd"] = round(d["amount_usd"] * scale, 2)
+        logger.warning(f"Total BUY ${total_buy:.2f} exceeds cash ${cash:.2f} — scaled down by {scale:.2f}")
+        safety_note = "amount_reduced"
 
-    return decision, "none"
+    return decisions, safety_note
 
 
 # ---------------------------------------------------------------------------
@@ -303,12 +348,15 @@ def run() -> None:
         logger.error(f"Ollama call failed: {e}")
         return
 
-    # Parse response
-    think_text, decision = parse_response(raw_response)
-    if decision is None:
+    # Parse response (supports multi-action)
+    think_text, decisions = parse_response(raw_response)
+    batch_id = str(uuid.uuid4())[:8]
+
+    if decisions is None:
         logger.error("Failed to parse a valid decision from Ollama response")
         append_trade_journal({
             "id": str(uuid.uuid4()),
+            "batch_id": batch_id,
             "timestamp": _now_iso(),
             "action": "HOLD",
             "ticker": "NONE",
@@ -321,64 +369,73 @@ def run() -> None:
         })
         return
 
-    # Safety gates
-    safe_decision, safety_note = check_safety_gates(decision, portfolio)
-    logger.info(f"Decision: {safe_decision['action']} {safe_decision['ticker']} ${safe_decision['amount_usd']:.2f} (safety: {safety_note})")
+    # Safety gates (operates on full batch)
+    safe_decisions, safety_note = check_safety_gates(decisions, portfolio)
+    for d in safe_decisions:
+        logger.info(f"Decision: {d['action']} {d['ticker']} ${d['amount_usd']:.2f} (safety: {safety_note})")
 
     if safety_note == "halt":
-        append_trade_journal({
-            "id": str(uuid.uuid4()),
-            "timestamp": _now_iso(),
-            **safe_decision,
-            "think_reasoning": think_text,
-            "safety_applied": "circuit_breaker",
-            "order_id": None,
-            "executed": False,
-        })
+        for d in safe_decisions:
+            append_trade_journal({
+                "id": str(uuid.uuid4()),
+                "batch_id": batch_id,
+                "timestamp": _now_iso(),
+                **d,
+                "think_reasoning": think_text,
+                "safety_applied": "circuit_breaker",
+                "order_id": None,
+                "executed": False,
+            })
         logger.warning("Pipeline halted by circuit breaker")
         return
 
-    # Execute order
-    order_id = None
-    executed = False
-    if safe_decision["action"] in ("BUY", "SELL"):
-        try:
-            order = broker.place_order(
-                ticker=safe_decision["ticker"],
-                side=safe_decision["action"].lower(),
-                amount_usd=safe_decision["amount_usd"],
-            )
-            order_id = str(order.id)
+    # Execute each action in batch
+    for decision in safe_decisions:
+        order_id = None
+        executed = False
+        if decision["action"] in ("BUY", "SELL"):
+            try:
+                order = broker.place_order(
+                    ticker=decision["ticker"],
+                    side=decision["action"].lower(),
+                    amount_usd=decision["amount_usd"],
+                )
+                order_id = str(order.id)
+                executed = True
+
+                if decision["action"] == "BUY":
+                    broker.attach_trailing_stop(order_id, decision["ticker"])
+            except Exception as e:
+                logger.error(f"Order execution failed for {decision['ticker']}: {e}")
+        elif decision["action"] == "HOLD":
             executed = True
 
-            if safe_decision["action"] == "BUY":
-                broker.attach_trailing_stop(order_id, safe_decision["ticker"])
+        # Log each action to trade journal
+        append_trade_journal({
+            "id": str(uuid.uuid4()),
+            "batch_id": batch_id,
+            "timestamp": _now_iso(),
+            "action": decision["action"],
+            "ticker": decision["ticker"],
+            "amount_usd": decision["amount_usd"],
+            "reasoning": decision["reasoning"],
+            "think_reasoning": think_text,
+            "safety_applied": safety_note,
+            "order_id": order_id,
+            "executed": executed,
+        })
 
-            broker.update_portfolio_history()
-        except Exception as e:
-            logger.error(f"Order execution failed: {e}")
-    elif safe_decision["action"] == "HOLD":
-        executed = True  # HOLD is a valid, intentional decision
-
-    # Log to trade journal
-    append_trade_journal({
-        "id": str(uuid.uuid4()),
-        "timestamp": _now_iso(),
-        "action": safe_decision["action"],
-        "ticker": safe_decision["ticker"],
-        "amount_usd": safe_decision["amount_usd"],
-        "reasoning": safe_decision["reasoning"],
-        "think_reasoning": think_text,
-        "safety_applied": safety_note,
-        "order_id": order_id,
-        "executed": executed,
-    })
+    # Always snapshot portfolio history — even on HOLD
+    try:
+        broker.update_portfolio_history()
+    except Exception as e:
+        logger.error(f"Portfolio history update failed: {e}")
 
     # Weekly macro update
     if _should_update_macro_trends():
         update_macro_trends(state)
 
-    logger.info("Agent: decision cycle complete")
+    logger.info(f"Agent: decision cycle complete (batch {batch_id}, {len(safe_decisions)} action(s))")
 
 
 # ---------------------------------------------------------------------------

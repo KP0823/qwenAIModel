@@ -4,6 +4,8 @@ import logging
 import subprocess
 import sys
 import time
+import zoneinfo
+from datetime import datetime
 from pathlib import Path
 
 import requests
@@ -70,10 +72,19 @@ def ensure_ollama_running():
     logger.error("Ollama failed to restart after 30s — agent will likely fail")
 
 
+def is_market_hours() -> bool:
+    """Check if current time is within US market hours (Mon-Fri, 9-16 ET)."""
+    et = datetime.now(zoneinfo.ZoneInfo("America/New_York"))
+    return et.weekday() < 5 and 9 <= et.hour < 16
+
+
 def run_pipeline():
     _setup_logging()
     logger = logging.getLogger("main")
     logger.info("=== Pipeline starting ===")
+
+    if not is_market_hours():
+        logger.warning("Outside US market hours — running anyway (manual trigger)")
 
     initialize_data_files()
     ensure_ollama_running()
