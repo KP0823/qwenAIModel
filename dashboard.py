@@ -95,7 +95,7 @@ with tab1:
                     "Unrealized P&L": f"{pl_color} ${p['unrealized_pl']:+.2f}",
                     "% Gain/Loss": f"{p['unrealized_plpc']:+.2f}%",
                 })
-            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
 
     except Exception as e:
         st.warning(f"Could not fetch live positions from Alpaca: {e}")
@@ -145,7 +145,7 @@ with tab2:
                     think = trade.get("think_reasoning", "")
                     if think:
                         st.markdown("**Internal Monologue (`<think>`):**")
-                        st.text_area("", value=think, height=200, key=trade.get("id", ts), disabled=True)
+                        st.text_area("AI Reasoning", value=think, height=200, key=trade.get("id", ts), disabled=True, label_visibility="collapsed")
                     meta = {k: v for k, v in trade.items() if k not in ("think_reasoning", "reasoning")}
                     st.json(meta)
         else:
@@ -189,11 +189,14 @@ with tab3:
                     "ETF": symbol,
                     "Price": price,
                     "RSI (14)": rsi,
+                    "MACD": data.get("macd", "N/A"),
+                    "50-Day MA": f"${data['ma_50']:.2f}" if data.get("ma_50") else "N/A",
                     "200-Day MA": ma,
+                    "MA Cross": data.get("ma_cross", "N/A"),
                     "Signal": data.get("signal", "N/A"),
                 })
             if etf_rows:
-                st.dataframe(pd.DataFrame(etf_rows), use_container_width=True, hide_index=True)
+                st.dataframe(pd.DataFrame(etf_rows), width="stretch", hide_index=True)
 
             # Headlines — 2x2 grid
             col_tl, col_tr = st.columns(2)

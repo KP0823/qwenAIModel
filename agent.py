@@ -32,8 +32,10 @@ def build_prompt(state: dict, portfolio: dict) -> str:
         price = f"${data['price']:.2f}" if data.get("price") else "N/A"
         rsi = f"{data['rsi']:.1f}" if data.get("rsi") is not None else "N/A"
         ma = f"${data['ma_200']:.2f}" if data.get("ma_200") else "N/A"
+        ma50 = f"${data['ma_50']:.2f}" if data.get("ma_50") else "N/A"
+        macd = data.get("macd", "N/A")
         signal = data.get("signal", "UNKNOWN")
-        etf_lines.append(f"  {symbol}: {price} | RSI: {rsi} | 200MA: {ma} | Signal: {signal}")
+        etf_lines.append(f"  {symbol}: {price} | RSI: {rsi} | MACD: {macd} | 50MA: {ma50} | 200MA: {ma} | Signal: {signal}")
 
     headlines = state.get("rss_headlines", [])[:15]
     headline_lines = []

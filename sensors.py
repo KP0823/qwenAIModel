@@ -26,7 +26,7 @@ def fetch_technical_data(symbol: str) -> dict:
 
         if hist.empty or len(hist) < 15:
             logger.warning(f"{symbol}: insufficient history")
-            return {"symbol": symbol, "price": None, "rsi": None, "ma_200": None, "signal": "INSUFFICIENT_DATA", "error": "insufficient history"}
+            return {"symbol": symbol, "price": None, "rsi": None, "ma_50": None, "ma_200": None, "macd": None, "ma_cross": None, "signal": "INSUFFICIENT_DATA", "error": "insufficient history"}
 
         price = float(hist["Close"].iloc[-1])
 
@@ -38,9 +38,28 @@ def fetch_technical_data(symbol: str) -> dict:
         rsi_series = 100 - (100 / (1 + rs))
         rsi = float(rsi_series.iloc[-1])
 
+        # 50-day MA
+        ma_50_raw = hist["Close"].rolling(50).mean().iloc[-1]
+        ma_50 = float(ma_50_raw) if not _is_nan(ma_50_raw) else None
+
         # 200-day MA
         ma_raw = hist["Close"].rolling(200).mean().iloc[-1]
         ma_200 = float(ma_raw) if not _is_nan(ma_raw) else None
+
+        # MACD (12/26/9 — standard, no TA library)
+        ema_12 = hist["Close"].ewm(span=12, adjust=False).mean()
+        ema_26 = hist["Close"].ewm(span=26, adjust=False).mean()
+        macd_line = ema_12 - ema_26
+        signal_line = macd_line.ewm(span=9, adjust=False).mean()
+        macd_val = float(macd_line.iloc[-1])
+        macd_signal_val = float(signal_line.iloc[-1])
+        macd_label = "BULLISH" if macd_val > macd_signal_val else "BEARISH"
+
+        # Golden/Death cross (50MA vs 200MA)
+        if ma_50 and ma_200:
+            cross = "GOLDEN_CROSS" if ma_50 > ma_200 else "DEATH_CROSS"
+        else:
+            cross = None
 
         # Signal
         if ma_200 is None:
@@ -57,19 +76,24 @@ def fetch_technical_data(symbol: str) -> dict:
         else:
             momentum = "NEUTRAL"
 
-        signal = f"{momentum}|{trend}"
+        signal = f"{momentum}|{trend}|{macd_label}"
+        if cross:
+            signal += f"|{cross}"
 
         return {
             "symbol": symbol,
             "price": round(price, 2),
             "rsi": round(rsi, 1),
+            "ma_50": round(ma_50, 2) if ma_50 else None,
             "ma_200": round(ma_200, 2) if ma_200 else None,
+            "macd": macd_label,
+            "ma_cross": cross,
             "signal": signal,
             "fetched_at": _now_iso(),
         }
     except Exception as e:
         logger.error(f"{symbol} technical fetch failed: {e}")
-        return {"symbol": symbol, "price": None, "rsi": None, "ma_200": None, "signal": "ERROR", "error": str(e)}
+        return {"symbol": symbol, "price": None, "rsi": None, "ma_50": None, "ma_200": None, "macd": None, "ma_cross": None, "signal": "ERROR", "error": str(e)}
 
 
 def fetch_rss_headlines() -> list:
@@ -323,6 +347,14 @@ def run() -> dict:
     """Run the full sensor pipeline and write system_state.json. Returns the state dict."""
     logger.info("Sensors: starting data collection")
 
+    # Load previous state to carry forward headlines if no new ones arrive
+    prev_state = {}
+    try:
+        with open(config.SYSTEM_STATE_FILE) as f:
+            prev_state = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        pass
+
     etf_data = {}
     yfinance_ok = True
     for symbol in config.TARGET_ETFS:
@@ -346,9 +378,9 @@ def run() -> dict:
     state = {
         "last_sync": _now_iso(),
         "etf_data": etf_data,
-        "rss_headlines": headlines,
-        "alphavantage_news": av_news,
-        "newsapi_headlines": newsapi_headlines,
+        "rss_headlines": headlines if headlines else prev_state.get("rss_headlines", []),
+        "alphavantage_news": av_news if av_news else prev_state.get("alphavantage_news", []),
+        "newsapi_headlines": newsapi_headlines if newsapi_headlines else prev_state.get("newsapi_headlines", []),
         "reddit_posts": reddit_posts,
         "api_health": {
             "yfinance": "ok" if yfinance_ok else "partial",
