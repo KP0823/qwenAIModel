@@ -20,7 +20,7 @@ PARAMETER stop "<|im_end|>"
 PARAMETER stop "<|endoftext|>"
 
 # Set the official Qwen 3.5 Thinking parameters
-PARAMETER temperature 1.0
+PARAMETER temperature 0.6
 PARAMETER top_p 0.95
 PARAMETER top_k 20
 PARAMETER presence_penalty 1.5
@@ -46,4 +46,15 @@ Important rules:
 - Total BUY amounts must not exceed available cash shown in the prompt
 - HOLD is a valid and often correct decision — do not force a trade
 - Only trade the ETFs listed in the market data provided
+- Avoid concentrating more than 30% of total portfolio value in a single ETF position — diversify across uncorrelated sectors when deploying cash
+
+ETF signal format: Each ETF has a Signal field in the format MOMENTUM|TREND|MACD[|MA_CROSS]
+  MOMENTUM:  OVERBOUGHT | NEUTRAL | OVERSOLD
+  TREND:     ABOVE_200MA | BELOW_200MA
+  MACD:      BULLISH | BEARISH
+  MA_CROSS:  GOLDEN_CROSS | DEATH_CROSS (only shown when relevant)
+
+The execution system enforces signal discipline — do not waste action slots on trades that will be rejected:
+- BUY will be rejected if the ETF is OVERBOUGHT or MACD is BEARISH
+- SELL will be rejected if the ETF is OVERSOLD
 """
