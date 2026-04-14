@@ -26,7 +26,7 @@ All reasoning, decisions, and portfolio history are logged and visualized in a l
 
 | Layer | Technology |
 |-------|-----------|
-| LLM | Qwen 3.5 9B (Q4_K_M) via Ollama — runs fully locally |
+| LLM | Qwen 3.5 9B (Q4_K_M) via Ollama — runs fully locally (temp=0.6, thinking mode) |
 | Backend | Python 3.9+ |
 | Frontend | Streamlit |
 | Brokerage | Alpaca Paper Trading (`alpaca-py`) |
