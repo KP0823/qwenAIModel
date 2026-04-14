@@ -3,11 +3,43 @@ import time
 from pathlib import Path
 
 import pandas as pd
-import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
+import yfinance as yf
 
 import config
+
+# ---------------------------------------------------------------------------
+# Benchmark data — cached 30 min for ~live delayed prices
+# ---------------------------------------------------------------------------
+BENCHMARKS = {
+    "S&P 500":      "^GSPC",
+    "NASDAQ":       "^IXIC",
+    "Russell 2000": "^RUT",
+}
+BENCH_COLORS = {
+    "S&P 500":      "#4361ee",   # royal blue
+    "NASDAQ":       "#f72585",   # hot pink
+    "Russell 2000": "#ff9f1c",   # amber
+}
+
+
+@st.cache_data(ttl=1800)
+def _fetch_benchmarks(start_date: str) -> pd.DataFrame:
+    """Download daily closes for all benchmarks from start_date to today (15-20 min delayed)."""
+    frames = {}
+    for name, ticker in BENCHMARKS.items():
+        try:
+            hist = yf.Ticker(ticker).history(start=start_date)
+            if not hist.empty:
+                frames[name] = hist["Close"]
+        except Exception:
+            pass
+    if not frames:
+        return pd.DataFrame()
+    df = pd.DataFrame(frames)
+    df.index = pd.to_datetime(df.index).normalize()
+    return df
 
 st.set_page_config(page_title="AI Macro Agent", page_icon="📈", layout="wide")
 st.title("Autonomous AI Macro-Strategy Agent")
@@ -19,87 +51,205 @@ tab1, tab2, tab3 = st.tabs(["Portfolio", "Brain Feed", "Market Sensors"])
 # Tab 1: Portfolio
 # ---------------------------------------------------------------------------
 with tab1:
-    st.subheader("Equity Curve")
+
+    # ── Load data once ──────────────────────────────────────────────────────
+    start = config.MAX_PORTFOLIO_USD
+    port_df = None
     if Path(config.PORTFOLIO_HISTORY_FILE).exists():
-        df = pd.read_csv(config.PORTFOLIO_HISTORY_FILE)
-        if not df.empty:
-            fig_equity = px.line(
-                df, x="date", y="total_value",
-                labels={"total_value": "Portfolio Value ($)", "date": "Date"},
-                title="Portfolio Equity Over Time",
-            )
-            fig_equity.update_traces(line_color="#00c896")
-            start = config.MAX_PORTFOLIO_USD
-            fig_equity.add_hline(y=start, line_dash="dot", line_color="gray",
-                                 annotation_text=f"Starting ${start:,.0f}")
-            st.plotly_chart(fig_equity, use_container_width=True)
+        _raw = pd.read_csv(config.PORTFOLIO_HISTORY_FILE)
+        if not _raw.empty:
+            port_df = _raw
 
-            latest = df.iloc[-1]
-            col1, col2, col3 = st.columns(3)
-            col1.metric("Total Value", f"${float(latest['total_value']):,.2f}")
-            col2.metric("Cash", f"${float(latest['cash']):,.2f}")
-            pnl = float(latest["total_value"]) - start
-            col3.metric(f"P&L vs ${start:,.0f} Start", f"${pnl:+.2f}")
-        else:
-            st.info("No portfolio history yet. Run the pipeline first.")
-    else:
-        st.info("portfolio_history.csv not found. Run main.py to generate data.")
-
-    st.subheader("Current Allocation")
     try:
         import broker
-        portfolio = broker.get_portfolio_value()
-        positions = portfolio["positions"]
-        cash = portfolio["cash"]
-        total_etf = sum(p["market_value"] for p in positions.values())
+        portfolio   = broker.get_portfolio_value()
+        positions   = portfolio["positions"]
+        cash        = portfolio["cash"]
+        total_etf   = sum(p["market_value"] for p in positions.values())
+        broker_ok   = True
+    except Exception:
+        portfolio = positions = None
+        cash = total_etf = 0.0
+        broker_ok = False
 
-        col_etf, col_cash = st.columns(2)
+    daily_port  = None
+    bench_df    = pd.DataFrame()
+    ai_pct      = None
+    if port_df is not None:
+        port_df["datetime"] = pd.to_datetime(port_df["date"])
+        port_df["day"]      = port_df["datetime"].dt.normalize()
+        daily_port          = port_df.groupby("day")["total_value"].last().reset_index()
+        daily_port.columns  = ["date", "portfolio_value"]
+        daily_port["pct_return"] = (daily_port["portfolio_value"] / start - 1) * 100
+        bench_df   = _fetch_benchmarks(daily_port["date"].iloc[0].strftime("%Y-%m-%d"))
+        ai_pct     = daily_port["pct_return"].iloc[-1]
 
-        with col_etf:
-            if positions:
-                fig_etf = go.Figure(data=[go.Pie(
-                    labels=list(positions.keys()),
-                    values=[p["market_value"] for p in positions.values()],
-                    hole=0.45,
-                    textinfo="label+percent",
+    # ── KPI strip ───────────────────────────────────────────────────────────
+    if port_df is not None:
+        latest  = port_df.iloc[-1]
+        tv      = float(latest["total_value"])
+        c       = float(latest["cash"])
+        pnl     = tv - start
+        pnl_pct = (tv / start - 1) * 100
+    else:
+        tv = c = pnl = pnl_pct = None
+
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("Portfolio Value",  f"${tv:,.2f}"          if tv   is not None else "—",
+              f"${pnl:+,.2f} all-time"                   if pnl  is not None else None)
+    k2.metric("All-Time P&L",     f"{pnl_pct:+.2f}%"     if pnl_pct is not None else "—",
+              f"${pnl:+,.2f}"                             if pnl  is not None else None)
+    k3.metric("Cash",             f"${c:,.2f}"            if c    is not None else "—")
+    k4.metric("In Market",        f"${tv - c:,.2f}"       if tv is not None and c is not None else "—")
+
+    st.divider()
+
+    # ── Equity curve (left) + Allocation donut (right) ──────────────────────
+    col_equity, col_alloc = st.columns([3, 2], gap="large")
+
+    with col_equity:
+        st.markdown("#### Equity Curve")
+        if port_df is not None:
+            _up      = port_df["total_value"].iloc[-1] >= start
+            _lc      = "#00c896" if _up else "#ff5050"
+            _fill    = "rgba(0,200,150,0.10)" if _up else "rgba(255,80,80,0.10)"
+
+            fig_eq = go.Figure()
+            fig_eq.add_trace(go.Scatter(
+                x=port_df["date"], y=port_df["total_value"],
+                fill="tozeroy", fillcolor=_fill,
+                line=dict(color=_lc, width=2.5),
+                mode="lines",
+                hovertemplate="$%{y:,.2f}<extra></extra>",
+            ))
+            fig_eq.add_hline(
+                y=start, line_dash="dot", line_color="rgba(160,160,160,0.5)",
+                annotation_text=f"Baseline ${start:,.0f}",
+                annotation_position="bottom right",
+            )
+            fig_eq.update_layout(
+                height=350, showlegend=False, hovermode="x unified",
+                margin=dict(l=0, r=10, t=10, b=0),
+                plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+                yaxis=dict(tickprefix="$", tickformat=",.0f",
+                           showgrid=True, gridcolor="rgba(128,128,128,0.10)"),
+                xaxis=dict(showgrid=False),
+            )
+            st.plotly_chart(fig_eq, use_container_width=True)
+        else:
+            st.info("Run main.py to generate portfolio history.")
+
+    with col_alloc:
+        st.markdown("#### Portfolio Allocation")
+        if broker_ok:
+            _etf_palette = [
+                "#00c896", "#ff9f1c", "#f72585", "#4361ee", "#7209b7",
+                "#3a0ca3", "#4cc9f0", "#f3722c", "#90be6d", "#43aa8b",
+            ]
+            _labels = (["Cash"] if cash > 0 else []) + list((positions or {}).keys())
+            _values = ([cash]   if cash > 0 else []) + [p["market_value"] for p in (positions or {}).values()]
+            _colors = (["#636EFA"] if cash > 0 else []) + [
+                _etf_palette[i % len(_etf_palette)] for i in range(len(positions or {}))
+            ]
+            if _values:
+                fig_alloc = go.Figure(data=[go.Pie(
+                    labels=_labels, values=_values,
+                    hole=0.52, textinfo="label+percent",
+                    marker_colors=_colors, textfont_size=12,
+                    hovertemplate="%{label}: $%{value:,.2f}<extra></extra>",
                 )])
-                fig_etf.update_layout(title="ETF Breakdown (Live)", showlegend=True)
-                st.plotly_chart(fig_etf, use_container_width=True)
+                fig_alloc.update_layout(
+                    height=350, showlegend=False,
+                    margin=dict(l=0, r=0, t=10, b=0),
+                    plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+                )
+                st.plotly_chart(fig_alloc, use_container_width=True)
             else:
-                st.info("No open ETF positions.")
+                st.info("No positions or cash data.")
+        else:
+            st.warning("Alpaca unavailable — live allocation not shown.")
 
-        with col_cash:
-            fig_cash = go.Figure(data=[go.Pie(
-                labels=["Cash", "ETF Holdings"],
-                values=[cash, total_etf if total_etf > 0 else 0.01],
-                hole=0.45,
-                textinfo="label+percent",
-                marker_colors=["#636EFA", "#00c896"],
-            )])
-            fig_cash.update_layout(title="Cash vs ETF Holdings", showlegend=True)
-            st.plotly_chart(fig_cash, use_container_width=True)
+    st.divider()
 
-        # Positions table
-        if positions:
-            st.subheader("Open Positions")
-            rows = []
-            for sym, p in positions.items():
-                pl_color = "🟢" if p["unrealized_pl"] >= 0 else "🔴"
-                rows.append({
-                    "ETF": sym,
-                    "Shares": round(p["qty"], 6),
-                    "Avg Entry": f"${p['avg_entry_price']:.2f}",
-                    "Current Price": f"${p['current_price']:.2f}",
-                    "Cost Basis": f"${p['cost_basis']:.2f}",
-                    "Market Value": f"${p['market_value']:.2f}",
-                    "Unrealized P&L": f"{pl_color} ${p['unrealized_pl']:+.2f}",
-                    "% Gain/Loss": f"{p['unrealized_plpc']:+.2f}%",
-                })
-            st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+    # ── Benchmark comparison ─────────────────────────────────────────────────
+    st.markdown("#### Performance vs Benchmarks")
+    st.caption("Index prices ~15-20 min delayed · Normalized to portfolio inception date")
 
-    except Exception as e:
-        st.warning(f"Could not fetch live positions from Alpaca: {e}")
-        st.info("Showing last known state from portfolio_history.csv")
+    if daily_port is not None:
+        fig_bench = go.Figure()
+        fig_bench.add_trace(go.Scatter(
+            x=daily_port["date"], y=daily_port["pct_return"],
+            name="AI Agent",
+            line=dict(color="#00c896", width=3),
+            mode="lines+markers", marker=dict(size=7, symbol="circle"),
+            hovertemplate="AI Agent: %{y:+.2f}%<extra></extra>",
+        ))
+
+        _bench_styles = [
+            ("S&P 500",      "#4361ee", "diamond"),
+            ("NASDAQ",       "#f72585", "square"),
+            ("Russell 2000", "#ff9f1c", "triangle-up"),
+        ]
+        if not bench_df.empty:
+            for bname, bcolor, bsymbol in _bench_styles:
+                if bname not in bench_df.columns:
+                    continue
+                _s = bench_df[bname].dropna()
+                if _s.empty:
+                    continue
+                _pct = (_s / _s.iloc[0] - 1) * 100
+                fig_bench.add_trace(go.Scatter(
+                    x=_s.index, y=_pct, name=bname,
+                    line=dict(color=bcolor, width=1.8, dash="dash"),
+                    mode="lines+markers", marker=dict(size=5, symbol=bsymbol),
+                    hovertemplate=f"{bname}: %{{y:+.2f}}%<extra></extra>",
+                ))
+
+        fig_bench.add_hline(y=0, line_dash="dot", line_color="rgba(150,150,150,0.35)")
+        fig_bench.update_layout(
+            height=370, hovermode="x unified",
+            margin=dict(l=0, r=0, t=10, b=0),
+            plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+            yaxis=dict(showgrid=True, gridcolor="rgba(128,128,128,0.12)", ticksuffix="%"),
+            xaxis=dict(showgrid=False),
+        )
+        st.plotly_chart(fig_bench, use_container_width=True)
+
+        if not bench_df.empty and ai_pct is not None:
+            b1, b2, b3 = st.columns(3)
+            for _col, bname in zip([b1, b2, b3], ["S&P 500", "NASDAQ", "Russell 2000"]):
+                if bname not in bench_df.columns:
+                    _col.metric(f"AI vs {bname}", "N/A"); continue
+                _s = bench_df[bname].dropna()
+                if _s.empty:
+                    _col.metric(f"AI vs {bname}", "N/A"); continue
+                _bp    = (_s.iloc[-1] / _s.iloc[0] - 1) * 100
+                _delta = ai_pct - _bp
+                _col.metric(f"AI vs {bname}", f"{ai_pct:+.2f}%", f"{_delta:+.2f}% vs index")
+    else:
+        st.info("No portfolio history. Run main.py first.")
+
+    # ── Open Positions table ─────────────────────────────────────────────────
+    if broker_ok and positions:
+        st.divider()
+        st.markdown("#### Open Positions")
+        _rows = []
+        for sym, p in positions.items():
+            _pl_icon = "🟢" if p["unrealized_pl"] >= 0 else "🔴"
+            _rows.append({
+                "ETF":           sym,
+                "Shares":        round(p["qty"], 6),
+                "Avg Entry":     f"${p['avg_entry_price']:.2f}",
+                "Current Price": f"${p['current_price']:.2f}",
+                "Cost Basis":    f"${p['cost_basis']:.2f}",
+                "Market Value":  f"${p['market_value']:.2f}",
+                "Unrealized P&L": f"{_pl_icon} ${p['unrealized_pl']:+.2f}",
+                "% Gain/Loss":   f"{p['unrealized_plpc']:+.2f}%",
+            })
+        st.dataframe(pd.DataFrame(_rows), width="stretch", hide_index=True)
+    elif not broker_ok:
+        st.caption("⚠️ Could not connect to Alpaca — live positions unavailable.")
 
 
 # ---------------------------------------------------------------------------
