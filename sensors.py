@@ -147,11 +147,10 @@ def fetch_alphavantage_news() -> list:
     articles = []
     new_seen = {}
 
-    tickers = ",".join(config.TARGET_ETFS)
     try:
         r = requests.get(
             config.ALPHA_VANTAGE_NEWS_URL,
-            params={"function": "NEWS_SENTIMENT", "tickers": tickers, "apikey": config.ALPHA_VANTAGE_API_KEY},
+            params={"function": "NEWS_SENTIMENT", "apikey": config.ALPHA_VANTAGE_API_KEY, "limit": 20},
             timeout=15,
         )
         r.raise_for_status()
