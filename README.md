@@ -8,14 +8,15 @@ A fully autonomous hourly trading agent that manages an Alpaca Paper Trading acc
 
 Instead of chasing individual stocks based on social media hype, this agent acts as a **Quantitative Macro-Analyst**. Every hour during market hours it:
 
-1. Pulls live technical data (price, RSI, 200-day MA) for 10 ETFs (6 sector + 4 active macro)
+1. Pulls live technical data (price, RSI, MACD, 50/200-day MA) for 10 ETFs (6 sector + 4 active macro)
 2. Scrapes macro headlines from Bloomberg, Yahoo Finance, and CNBC via RSS
-3. Fetches ticker-specific news sentiment from Alpha Vantage
+3. Fetches general financial news sentiment from Alpha Vantage
 4. Pulls top business headlines from NewsAPI
 5. Reads sentiment from financial subreddits via Reddit API
 6. Feeds all of that into a locally hosted Qwen 3.5 9B model
 7. Parses the AI's structured JSON array of 1-3 trade actions (`BUY` / `SELL` / `HOLD`)
-8. Executes each order via Alpaca Paper Trading with automatic trailing stop-losses
+8. Validates each action against live technical signals before execution
+9. Executes each order via Alpaca Paper Trading with automatic GTC trailing stop-losses
 
 All reasoning, decisions, and portfolio history are logged and visualized in a live Streamlit dashboard.
 
@@ -77,7 +78,7 @@ Gives the stateless LLM long-term context across sessions:
 Builds a rich context prompt from sensor data and memory, calls the local Qwen model, and parses the forced Chain-of-Thought (`<think>`) + structured JSON array response. The parser accepts both JSON arrays (1-3 actions) and single JSON objects (backward compatible). A single HOLD in any batch cancels all actions. Applies safety guardrails before routing to the execution layer.
 
 **4. Execution & Guardrails** — `broker.py` + `agent.py`
-Executes each action in the batch sequentially via Alpaca, protected by three safety nets: a circuit breaker, a PDT compliance proxy (accounts for batch size), and automatic trailing stop-losses on every BUY. BUY amounts exceeding available cash are proportionally scaled down across the batch.
+Executes each action in the batch sequentially via Alpaca, protected by multiple safety layers: a circuit breaker (prior-day comparison), a rolling trade rate limiter, a technical signal agreement filter (blocks trades that contradict momentum indicators), a SELL position guard (skips sells on unheld tickers), and automatic GTC trailing stop-losses on every BUY. SELL amounts are clipped to actual position value. BUY amounts exceeding available cash are proportionally scaled down across the batch.
 
 ---
 
@@ -89,14 +90,17 @@ Executes each action in the batch sequentially via Alpaca, protected by three sa
 - **Forced Chain-of-Thought** — model outputs a `<think>` internal monologue debating risk/reward before every decision
 - **Structured JSON output** — strict schema prevents hallucinations from crashing execution
 - **Fractional shares** — notional (dollar-based) orders let the agent trade with any amount
-- **Automatic trailing stops** — every BUY order gets a 10% trailing stop-loss attached after fill
-- **Circuit breaker** — halts all trading if the portfolio drops >5% in a single day
-- **PDT compliance proxy** — enforces swing-trading discipline (max 6 non-HOLD actions per 5-day rolling window)
+- **Automatic GTC trailing stops** — every BUY order gets a 10% trailing stop-loss (Good Till Cancelled) attached after fill, persisting overnight
+- **Technical signal agreement filter** — BUY blocked if ETF is OVERBOUGHT or MACD is BEARISH; SELL blocked if OVERSOLD
+- **Circuit breaker** — halts all trading if the portfolio drops >5% vs the prior calendar day's close
+- **Rolling trade rate limiter** — max 6 BUY/SELL actions per 5-day rolling window
+- **SELL position guard** — SELL orders skipped if the ticker is not currently held; never sends invalid orders to Alpaca
+- **Position-aware SELL sizing** — SELL amount clipped to actual position market value
 - **Headline deduplication** — MD5 hashing with 7-day TTL ensures news is never re-fed to the model
 - **Ollama auto-restart** — detects and restarts Ollama if it crashes between runs
-- **Weekly macro outlook** — AI synthesizes a fresh 3-paragraph markdown outlook every Monday
+- **Weekly macro outlook** — AI synthesizes a fresh 3-paragraph markdown outlook once per Monday
 - **Batch grouping** — multi-action decisions are linked by `batch_id` in the trade journal
-- **Full observability** — Streamlit dashboard exposes every trade decision, reasoning, and equity curve
+- **Full observability** — Streamlit dashboard exposes every trade decision, reasoning, equity curve, and performance metrics
 - **Pending stops** — trailing stops that can't attach (market closed) are saved and retried next run
 
 ---
@@ -227,9 +231,9 @@ The Streamlit dashboard (`localhost:8501`) has three tabs:
 
 | Tab | Contents |
 |-----|---------|
-| **Portfolio** | Equity line chart, live ETF allocation donut, Cash vs ETF Holdings donut, positions table with cost basis/P&L |
-| **Brain Feed** | Timeline of every trade — expandable cards showing the AI's full `<think>` reasoning, batch grouping for multi-action decisions |
-| **Market Sensors** | ETF technical table, API health indicators, 2x2 news grid (RSS, Alpha Vantage, NewsAPI, Reddit) |
+| **Portfolio** | KPI strip (value, P&L, cash, in-market) · equity curve · allocation donut · benchmark comparison vs S&P 500 / NASDAQ / Russell 2000 · performance metrics (Max Drawdown, Sharpe Ratio, Win Rate) · open positions table |
+| **Brain Feed** | Timeline of every trade — expandable cards showing the AI's full `<think>` reasoning, batch grouping for multi-action decisions, safety guardrail warnings |
+| **Market Sensors** | ETF technical table (RSI, MACD, 50/200 MA, signal) · API health indicators · 2x2 news grid (RSS, Alpha Vantage, NewsAPI, Reddit) |
 
 Auto-refreshes every 60 seconds.
 
@@ -239,10 +243,13 @@ Auto-refreshes every 60 seconds.
 
 | Guardrail | Behavior |
 |-----------|---------|
-| **Circuit Breaker** | Halts all trading if portfolio drops ≥5% in one day |
-| **PDT Proxy** | Forces HOLD if ≥6 non-HOLD trades executed in the last 5 rolling days |
+| **Circuit Breaker** | Halts all trading if portfolio drops ≥5% vs prior calendar day's last close |
+| **Rolling Trade Rate Limiter** | Forces HOLD if ≥6 BUY/SELL actions executed in the last 5 rolling days |
+| **Signal Agreement Filter** | BUY blocked when ETF is OVERBOUGHT or MACD is BEARISH; SELL blocked when OVERSOLD |
+| **SELL Position Guard** | SELL skipped and journalled if the ticker is not currently held |
+| **SELL Size Clip** | SELL `amount_usd` clipped to actual position market value if AI requests more than held |
 | **Amount Cap** | Total BUY amounts across batch capped to 95% of available cash (proportionally scaled) |
-| **Trailing Stop** | 10% trailing stop-loss automatically attached to every filled BUY order |
+| **Trailing Stop (GTC)** | 10% trailing stop-loss (Good Till Cancelled) automatically attached to every filled BUY — persists overnight |
 | **Pending Stops** | Stops that can't attach (market closed) are saved to `pending_stops.json` and retried next run |
 | **JSON Validation** | Decisions failing schema validation default to HOLD — never crash to an unintended trade |
 | **HOLD Cancels Batch** | A single HOLD action in any multi-action response cancels all other actions |

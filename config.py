@@ -42,10 +42,10 @@ NEWSAPI_URL = "https://newsapi.org/v2/top-headlines"
 REDDIT_SUBREDDITS = ["investing", "stocks", "economics"]
 
 # --- Risk Parameters ---
-CIRCUIT_BREAKER_PCT = 0.05   # halt trading if portfolio drops >5% in one day
-PDT_MAX_DAY_TRADES = 6       # max non-HOLD actions in rolling window (relaxed for hourly runs)
-PDT_ROLLING_DAYS = 5
-TRAILING_STOP_PCT = 10.0     # trailing stop percentage attached to every BUY
+CIRCUIT_BREAKER_PCT = 0.05     # halt trading if portfolio drops >5% in one day
+MAX_TRADES_ROLLING = 6         # max BUY/SELL actions in rolling window (rate limiter, not PDT)
+ROLLING_TRADE_DAYS = 5         # rolling window size in calendar days
+TRAILING_STOP_PCT = 10.0       # trailing stop percentage attached to every BUY (GTC)
 MAX_PORTFOLIO_USD = 100_000.0  # paper account default — change to 50.0 when switching to live $50 account
 
 # --- Market Hours (ET) ---

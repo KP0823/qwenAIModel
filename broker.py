@@ -118,7 +118,7 @@ def attach_trailing_stop(order_id: str, symbol: str, trail_percent: float = None
         qty=filled_qty,
         side=OrderSide.SELL,
         trail_percent=trail_percent,
-        time_in_force=TimeInForce.DAY,
+        time_in_force=TimeInForce.GTC,
     )
     stop_order = client.submit_order(stop_request)
     logger.info(f"Trailing stop attached for {symbol}: {trail_percent}% — stop order id: {stop_order.id}")
@@ -166,7 +166,7 @@ def process_pending_stops() -> None:
                     qty=filled_qty,
                     side=OrderSide.SELL,
                     trail_percent=meta["trail_percent"],
-                    time_in_force=TimeInForce.DAY,
+                    time_in_force=TimeInForce.GTC,
                 )
                 client.submit_order(stop_request)
                 logger.info(f"Pending trailing stop attached for {meta['symbol']} (order {order_id})")

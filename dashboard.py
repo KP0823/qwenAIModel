@@ -53,12 +53,13 @@ tab1, tab2, tab3 = st.tabs(["Portfolio", "Brain Feed", "Market Sensors"])
 with tab1:
 
     # ── Load data once ──────────────────────────────────────────────────────
-    start = config.MAX_PORTFOLIO_USD
     port_df = None
     if Path(config.PORTFOLIO_HISTORY_FILE).exists():
         _raw = pd.read_csv(config.PORTFOLIO_HISTORY_FILE)
         if not _raw.empty:
             port_df = _raw
+    # Use first recorded portfolio value as inception baseline (not the hardcoded constant)
+    start = float(port_df.iloc[0]["total_value"]) if port_df is not None else config.MAX_PORTFOLIO_USD
 
     try:
         import broker
@@ -229,6 +230,41 @@ with tab1:
                 _col.metric(f"AI vs {bname}", f"{ai_pct:+.2f}%", f"{_delta:+.2f}% vs index")
     else:
         st.info("No portfolio history. Run main.py first.")
+
+    # ── Performance Metrics ──────────────────────────────────────────────────
+    if daily_port is not None and len(daily_port) >= 2:
+        st.divider()
+        st.markdown("#### Strategy Performance")
+
+        # Max Drawdown from portfolio_history
+        _vals = daily_port["portfolio_value"]
+        _peak = _vals.cummax()
+        _dd = ((_vals - _peak) / _peak * 100)
+        max_drawdown = float(_dd.min())
+
+        # Sharpe Ratio (annualised, risk-free = 0 for simplicity)
+        _daily_ret = _vals.pct_change().dropna()
+        sharpe = float(_daily_ret.mean() / _daily_ret.std() * (252 ** 0.5)) if _daily_ret.std() > 0 else 0.0
+
+        # Win Rate from trade journal
+        win_rate_str = "—"
+        try:
+            _journal_path = Path(config.TRADE_JOURNAL_FILE)
+            if _journal_path.exists():
+                import json as _json
+                _trades = _json.loads(_journal_path.read_text())
+                _buys = [t for t in _trades if t.get("action") == "BUY" and t.get("executed")]
+                if _buys:
+                    _wins = sum(1 for t in _buys if t.get("ticker") in (positions or {})
+                                and (positions or {}).get(t["ticker"], {}).get("unrealized_pl", 0) >= 0)
+                    win_rate_str = f"{_wins / len(_buys) * 100:.0f}% ({_wins}/{len(_buys)} open)"
+        except Exception:
+            pass
+
+        pm1, pm2, pm3 = st.columns(3)
+        pm1.metric("Max Drawdown", f"{max_drawdown:.2f}%")
+        pm2.metric("Sharpe Ratio (ann.)", f"{sharpe:.2f}")
+        pm3.metric("Open Position Win Rate", win_rate_str)
 
     # ── Open Positions table ─────────────────────────────────────────────────
     if broker_ok and positions:

@@ -206,27 +206,51 @@ def parse_response(raw: str) -> tuple:
 # Safety Guardrails
 # ---------------------------------------------------------------------------
 
-def check_safety_gates(decisions: list, portfolio: dict) -> tuple:
+def _check_signal_agreement(decision: dict, state: dict) -> bool:
+    """
+    Returns True if the LLM's action agrees with the ETF's technical signal.
+    BUY is blocked when OVERBOUGHT or MACD is BEARISH.
+    SELL is blocked when OVERSOLD (don't sell into a potential bottom).
+    """
+    ticker = decision.get("ticker", "")
+    action = decision.get("action", "")
+    etf_data = state.get("etf_data", {}).get(ticker, {})
+    if not etf_data:
+        return True  # no data — allow through
+    signal = etf_data.get("signal", "")
+    macd = etf_data.get("macd", "")
+    if action == "BUY" and ("OVERBOUGHT" in signal or macd == "BEARISH"):
+        logger.warning(f"Signal filter: BUY {ticker} blocked — signal={signal}, macd={macd}")
+        return False
+    if action == "SELL" and "OVERSOLD" in signal:
+        logger.warning(f"Signal filter: SELL {ticker} blocked — signal={signal} (oversold, possible bottom)")
+        return False
+    return True
+
+
+def check_safety_gates(decisions: list, portfolio: dict, state: dict = None) -> tuple:
     """
     Accepts a list of decision dicts. Returns (safe_decisions_list, safety_note).
-    safety_note: "none" | "circuit_breaker" | "pdt" | "amount_reduced" | "halt"
+    safety_note: "none" | "circuit_breaker" | "rate_limit" | "amount_reduced" | "halt"
     """
     import csv
 
     hold_all = lambda reason, note: ([{"action": "HOLD", "ticker": "NONE", "amount_usd": 0.0, "reasoning": reason}], note)
 
-    # 1. Circuit breaker: compare today's value to yesterday's close
+    # 1. Circuit breaker: compare today's value to prior calendar day's last close
     try:
         if os.path.exists(config.PORTFOLIO_HISTORY_FILE):
             with open(config.PORTFOLIO_HISTORY_FILE) as f:
                 rows = list(csv.DictReader(f))
-            if rows:
-                yesterday_value = float(rows[-1]["total_value"])
+            today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            prior_rows = [r for r in rows if not r["date"].startswith(today_str)]
+            if prior_rows:
+                prior_value = float(prior_rows[-1]["total_value"])
                 current_value = portfolio["total_value"]
-                drop_pct = (yesterday_value - current_value) / yesterday_value
+                drop_pct = (prior_value - current_value) / prior_value
                 if drop_pct >= config.CIRCUIT_BREAKER_PCT:
                     logger.warning(f"CIRCUIT BREAKER triggered: drop={drop_pct:.1%}")
-                    return hold_all(f"Circuit breaker: portfolio dropped {drop_pct:.1%} today.", "halt")
+                    return hold_all(f"Circuit breaker: portfolio dropped {drop_pct:.1%} vs prior day.", "halt")
     except Exception as e:
         logger.error(f"Circuit breaker check failed: {e}")
 
@@ -234,23 +258,46 @@ def check_safety_gates(decisions: list, portfolio: dict) -> tuple:
     if all(d["action"] == "HOLD" for d in decisions):
         return decisions, "none"
 
-    # 2. PDT check: count existing trades + new batch against limit
+    # 2. Rolling trade rate limiter: cap total BUY/SELL actions in rolling window
     try:
         journal = _load_json(config.TRADE_JOURNAL_FILE, [])
-        cutoff = datetime.now(timezone.utc) - timedelta(days=config.PDT_ROLLING_DAYS)
+        cutoff = datetime.now(timezone.utc) - timedelta(days=config.ROLLING_TRADE_DAYS)
         existing_trades = len([
             e for e in journal
             if e.get("action") in ("BUY", "SELL")
             and _parse_iso(e.get("timestamp", "")) >= cutoff
         ])
         new_trades = len([d for d in decisions if d["action"] in ("BUY", "SELL")])
-        if existing_trades + new_trades > config.PDT_MAX_DAY_TRADES:
-            logger.warning(f"PDT limit: {existing_trades} existing + {new_trades} new > {config.PDT_MAX_DAY_TRADES}")
-            return hold_all(f"PDT guardrail: {existing_trades}+{new_trades} trades exceed rolling window limit.", "pdt")
+        if existing_trades + new_trades > config.MAX_TRADES_ROLLING:
+            logger.warning(f"Trade rate limit: {existing_trades} existing + {new_trades} new > {config.MAX_TRADES_ROLLING}")
+            return hold_all(f"Rate limiter: {existing_trades}+{new_trades} trades exceed {config.ROLLING_TRADE_DAYS}-day window limit.", "rate_limit")
     except Exception as e:
-        logger.error(f"PDT check failed: {e}")
+        logger.error(f"Trade rate limit check failed: {e}")
 
-    # 3. Amount cap: total BUY amounts must not exceed cash
+    # 3. Technical signal agreement filter
+    if state:
+        filtered = []
+        for d in decisions:
+            if d["action"] in ("BUY", "SELL") and not _check_signal_agreement(d, state):
+                filtered.append({**d, "action": "HOLD", "ticker": "NONE", "amount_usd": 0.0,
+                                  "reasoning": f"Signal filter overrode {d['action']} {d['ticker']}: technical indicators disagree"})
+            else:
+                filtered.append(d)
+        decisions = filtered
+
+    if all(d["action"] == "HOLD" for d in decisions):
+        return decisions, "signal_filter"
+
+    # 4. Position-aware SELL sizing: clip SELL amount to actual position value
+    positions = portfolio.get("positions", {})
+    for d in decisions:
+        if d["action"] == "SELL":
+            pos = positions.get(d["ticker"])
+            if pos and d["amount_usd"] > pos["market_value"]:
+                logger.warning(f"SELL {d['ticker']}: requested ${d['amount_usd']:.2f} > position ${pos['market_value']:.2f} — clipping")
+                d["amount_usd"] = round(pos["market_value"], 2)
+
+    # 5. Amount cap: total BUY amounts must not exceed cash
     safety_note = "none"
     total_buy = sum(d["amount_usd"] for d in decisions if d["action"] == "BUY")
     cash = portfolio["cash"]
@@ -287,8 +334,12 @@ def append_trade_journal(entry: dict) -> None:
 def _should_update_macro_trends() -> bool:
     if not os.path.exists(config.MACRO_TRENDS_FILE):
         return True
-    # Update on Mondays (weekday 0)
-    return datetime.now(timezone.utc).weekday() == 0
+    # Update on Mondays, but only once — skip if already written today
+    now = datetime.now(timezone.utc)
+    if now.weekday() != 0:
+        return False
+    mtime = datetime.fromtimestamp(os.path.getmtime(config.MACRO_TRENDS_FILE), tz=timezone.utc)
+    return mtime.date() < now.date()
 
 
 def update_macro_trends(state: dict) -> None:
@@ -372,7 +423,7 @@ def run() -> None:
         return
 
     # Safety gates (operates on full batch)
-    safe_decisions, safety_note = check_safety_gates(decisions, portfolio)
+    safe_decisions, safety_note = check_safety_gates(decisions, portfolio, state)
     for d in safe_decisions:
         logger.info(f"Decision: {d['action']} {d['ticker']} ${d['amount_usd']:.2f} (safety: {safety_note})")
 
@@ -395,6 +446,25 @@ def run() -> None:
     for decision in safe_decisions:
         order_id = None
         executed = False
+
+        # Guard: skip SELL if we don't hold the position
+        if decision["action"] == "SELL" and decision["ticker"] not in portfolio.get("positions", {}):
+            logger.warning(f"SELL skipped — no position in {decision['ticker']}")
+            append_trade_journal({
+                "id": str(uuid.uuid4()),
+                "batch_id": batch_id,
+                "timestamp": _now_iso(),
+                "action": "SELL",
+                "ticker": decision["ticker"],
+                "amount_usd": decision["amount_usd"],
+                "reasoning": decision["reasoning"],
+                "think_reasoning": think_text,
+                "safety_applied": "no_position",
+                "order_id": None,
+                "executed": False,
+            })
+            continue
+
         if decision["action"] in ("BUY", "SELL"):
             try:
                 order = broker.place_order(

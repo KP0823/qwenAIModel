@@ -182,7 +182,7 @@ def fetch_alphavantage_news() -> list:
     except Exception as e:
         logger.error(f"Alpha Vantage news fetch failed: {e}")
 
-    _save_seen_headlines(_load_seen_headlines(), new_seen)
+    _save_seen_headlines(seen, new_seen)
     logger.info(f"Alpha Vantage: {len(articles)} new articles")
     return articles[:15]
 
@@ -238,7 +238,7 @@ def fetch_newsapi_headlines() -> list:
     except Exception as e:
         logger.error(f"NewsAPI fetch failed: {e}")
 
-    _save_seen_headlines(_load_seen_headlines(), new_seen)
+    _save_seen_headlines(seen, new_seen)
     logger.info(f"NewsAPI: {len(headlines)} new headlines")
     return headlines[:15]
 
