@@ -1,6 +1,6 @@
 # Autonomous AI Macro-Strategy Agent
 
-A fully autonomous hourly trading agent that manages an Alpaca Paper Trading account ($100k paper, transitioning to $50 live). It synthesizes macro news from multiple sources (RSS, Alpha Vantage, NewsAPI, Reddit), ETF technical indicators, and sentiment data, then uses a locally hosted Qwen 3.5 9B LLM to make structured multi-action trade decisions across Sector and Active ETFs. A Streamlit dashboard provides full observability into the AI's reasoning.
+A fully autonomous hourly trading agent that manages an Alpaca Paper Trading account ($100k paper, transitioning to $50 live). It synthesizes macro news from 5 sources (RSS, Alpha Vantage, NewsAPI, Alpaca News, Reddit), filters and enriches it through a keyword triage layer, and uses a locally hosted Qwen 3.5 9B LLM to make structured multi-action trade decisions across Sector and Active ETFs. A Streamlit dashboard provides full observability into the AI's reasoning.
 
 ---
 
@@ -12,11 +12,14 @@ Instead of chasing individual stocks based on social media hype, this agent acts
 2. Scrapes macro headlines from Bloomberg, Yahoo Finance, and CNBC via RSS
 3. Fetches general financial news sentiment from Alpha Vantage
 4. Pulls top business headlines from NewsAPI
-5. Reads sentiment from financial subreddits via Reddit API
-6. Feeds all of that into a locally hosted Qwen 3.5 9B model
-7. Parses the AI's structured JSON array of 1-3 trade actions (`BUY` / `SELL` / `HOLD`)
-8. Validates each action against live technical signals before execution
-9. Executes each order via Alpaca Paper Trading with automatic GTC trailing stop-losses
+5. Fetches ETF-targeted articles with pre-written summaries from Alpaca News API
+6. Scrapes financial subreddits (r/investing, r/stocks, r/economics) including post body text, score, and comment count — no API credentials required
+7. Runs a keyword-based triage pass: scores every article 1-10 for macro/sector relevance, identifies the sector ETF, extracts large-cap ticker mentions, drops noise below threshold
+8. Classifies relevant Reddit posts as BULLISH/BEARISH/NEUTRAL via a small Qwen batch call (understands Reddit slang)
+9. Feeds the enriched, filtered news alongside ETF technicals into the local Qwen 3.5 9B model
+10. Parses the AI's structured JSON array of 1-3 trade actions (`BUY` / `SELL` / `HOLD`)
+11. Validates each action against live technical signals before execution
+12. Executes each order via Alpaca Paper Trading with automatic GTC trailing stop-losses
 
 All reasoning, decisions, and portfolio history are logged and visualized in a live Streamlit dashboard.
 
@@ -32,8 +35,8 @@ All reasoning, decisions, and portfolio history are logged and visualized in a l
 | Brokerage | Alpaca Paper Trading (`alpaca-py`) |
 | Market Data | yfinance |
 | News (RSS) | feedparser (Bloomberg, Yahoo Finance, CNBC) |
-| News (API) | Alpha Vantage NEWS_SENTIMENT, NewsAPI top headlines |
-| Sentiment | PRAW (Reddit API) |
+| News (API) | Alpha Vantage NEWS_SENTIMENT, NewsAPI top headlines, Alpaca News API |
+| Sentiment | Reddit public JSON API (no credentials) + Qwen sentiment batch |
 | Hardware | M4 Mac Mini (16GB) — model fits in ~6GB RAM |
 
 ---
@@ -47,12 +50,15 @@ main.py  (launchd entry point — hourly Mon-Fri 10-15 ET)
   ├── sensors.py   →  data/system_state.json
   │     ├── yfinance (10 ETFs: RSI, 200MA, price)
   │     ├── RSS feeds (Bloomberg, Yahoo, CNBC)
-  │     ├── Alpha Vantage NEWS_SENTIMENT (ticker-specific)
+  │     ├── Alpha Vantage NEWS_SENTIMENT (general feed)
   │     ├── NewsAPI top headlines (business)
-  │     └── Reddit PRAW (pending approval)
+  │     ├── Alpaca News API (ETF-targeted, pre-written summaries)
+  │     └── Reddit JSON API (body text + score + comments, no credentials)
   └── agent.py
         ├── broker.process_pending_stops()  → attach stops from prior run
         ├── reads:  system_state.json, macro_trends.md, trade_journal.json
+        ├── triage_news()  → keyword scoring + Qwen Reddit sentiment batch
+        ├── writes: enriched_news.json  (for dashboard)
         ├── calls:  Ollama localhost:11434  (StockAI:latest)
         ├── parses: JSON array of 1-3 actions (batch execution)
         ├── calls:  broker.py  →  Alpaca paper-api
@@ -64,7 +70,7 @@ dashboard.py  (separate Streamlit process — read only)
 ### 4-Part System
 
 **1. Market Sensors** — `sensors.py`
-Runs hourly to collect unbiased market data from 5 sources. Fetches ETF technicals via yfinance, macro headlines via RSS, ticker-specific sentiment via Alpha Vantage, business headlines via NewsAPI, and community sentiment via Reddit PRAW. All headlines are deduplicated via MD5 hashing (7-day TTL) and age-filtered (3-day max). Writes everything atomically to `data/system_state.json`.
+Runs hourly to collect unbiased market data from 5 sources. Fetches ETF technicals via yfinance, macro headlines via RSS, general news sentiment via Alpha Vantage, business headlines via NewsAPI, ETF-targeted articles via Alpaca News, and community posts (title + body text + engagement) from financial subreddits via Reddit's public JSON API. All headlines are deduplicated via MD5 hashing (7-day TTL) and age-filtered (3-day max). Writes everything atomically to `data/system_state.json`.
 
 **2. Memory Hub** — `data/`
 Gives the stateless LLM long-term context across sessions:
@@ -75,7 +81,7 @@ Gives the stateless LLM long-term context across sessions:
 - `seen_headlines.json` — MD5 dedup hashes to prevent re-feeding headlines
 
 **3. Decision Engine** — `agent.py`
-Builds a rich context prompt from sensor data and memory, calls the local Qwen model, and parses the forced Chain-of-Thought (`<think>`) + structured JSON array response. The parser accepts both JSON arrays (1-3 actions) and single JSON objects (backward compatible). A single HOLD in any batch cancels all actions. Applies safety guardrails before routing to the execution layer.
+Before building the trading prompt, runs a two-stage news enrichment pass: keyword scoring classifies every article by macro/sector relevance (1-10), identifies the closest sector ETF, and extracts large-cap ticker mentions; relevant Reddit posts then get a single small Qwen batch call for BULLISH/BEARISH/NEUTRAL sentiment (understands Reddit slang; falls back to keyword sentiment on timeout). Only articles scoring ≥ 6 reach the model. The enriched articles are also written to `enriched_news.json` for the dashboard. Then builds a rich context prompt, calls the local Qwen model, and parses the forced Chain-of-Thought (`<think>`) + structured JSON array response. A single HOLD in any batch cancels all actions. Applies safety guardrails before routing to the execution layer.
 
 **4. Execution & Guardrails** — `broker.py` + `agent.py`
 Executes each action in the batch sequentially via Alpaca, protected by multiple safety layers: a circuit breaker (prior-day comparison), a rolling trade rate limiter, a technical signal agreement filter (blocks trades that contradict momentum indicators), a SELL position guard (skips sells on unheld tickers), and automatic GTC trailing stop-losses on every BUY. SELL amounts are clipped to actual position value. BUY amounts exceeding available cash are proportionally scaled down across the batch.
@@ -85,7 +91,9 @@ Executes each action in the batch sequentially via Alpaca, protected by multiple
 ## Features
 
 - **Multi-action decisions** — model outputs 1-3 trade actions per run as a JSON array; HOLD cancels entire batch
-- **5 data sources** — RSS, Alpha Vantage, NewsAPI, Reddit, yfinance — all zero-cost
+- **5 news sources** — RSS, Alpha Vantage, NewsAPI, Alpaca News, Reddit — all zero-cost
+- **Keyword news triage** — all articles scored for macro/sector relevance; noise filtered before the trading prompt; sector ETF and large-cap tickers auto-tagged
+- **Reddit body text analysis** — captures post body, score, and comment count; Qwen classifies sentiment (BULLISH/BEARISH/NEUTRAL) understanding Reddit slang (tendies, rekt, diamond hands, etc.)
 - **Hourly execution** — 6 runs per day during market hours (10 AM - 3 PM ET, Mon-Fri)
 - **Forced Chain-of-Thought** — model outputs a `<think>` internal monologue debating risk/reward before every decision
 - **Structured JSON output** — strict schema prevents hallucinations from crashing execution
@@ -125,9 +133,7 @@ ALPACA_API_KEY=...
 ALPACA_SECRET_KEY=...
 ALPHA_VANTAGE_API_KEY=...     # free tier: 25 req/day — https://www.alphavantage.co/support/#api-key
 NEWS_API_KEY=...              # free tier: 100 req/day — https://newsapi.org/register
-REDDIT_CLIENT_ID=...          # optional, pending Reddit API approval
-REDDIT_CLIENT_SECRET=...
-REDDIT_USER_AGENT=MacroAgent/1.0 by YourUsername
+REDDIT_USER_AGENT=MacroAgent/1.0 by YourUsername   # HTTP header for public Reddit JSON API (no OAuth needed)
 ```
 
 ### ModelFile Setup
@@ -233,7 +239,7 @@ The Streamlit dashboard (`localhost:8501`) has three tabs:
 |-----|---------|
 | **Portfolio** | KPI strip (value, P&L, cash, in-market) · equity curve · allocation donut · benchmark comparison vs S&P 500 / NASDAQ / Russell 2000 · performance metrics (Max Drawdown, Sharpe Ratio, Win Rate) · open positions table |
 | **Brain Feed** | Timeline of every trade — expandable cards showing the AI's full `<think>` reasoning, batch grouping for multi-action decisions, safety guardrail warnings |
-| **Market Sensors** | ETF technical table (RSI, MACD, 50/200 MA, signal) · API health indicators · 2x2 news grid (RSS, Alpha Vantage, NewsAPI, Reddit) |
+| **Market Sensors** | ETF technical table (RSI, MACD, 50/200 MA, signal) · API health indicators · enriched news cards (relevance score, sector ETF, sentiment icon, summary, tickers, Reddit engagement) · raw feed counts for all 5 sources |
 
 Auto-refreshes every 60 seconds.
 
@@ -262,9 +268,9 @@ Auto-refreshes every 60 seconds.
 qwenAIModel/
 ├── ModelFile.example       # Ollama model config template — copy to ModelFile and update the FROM path
 ├── config.py               # Central constants hub (all modules import from here)
-├── sensors.py              # Data pipeline: yfinance, RSS, Alpha Vantage, NewsAPI, Reddit
+├── sensors.py              # Data pipeline: yfinance, RSS, Alpha Vantage, NewsAPI, Alpaca News, Reddit
 ├── broker.py               # Alpaca paper trading: orders, trailing stops, portfolio history
-├── agent.py                # AI brain: prompt builder, Ollama caller, multi-action parser, safety gates
+├── agent.py                # AI brain: keyword triage, Reddit sentiment, prompt builder, Ollama caller, safety gates
 ├── main.py                 # Entry point: market hours check, Ollama health, sensors → agent
 ├── dashboard.py            # Streamlit observability dashboard (3 tabs)
 ├── reset_account.py        # Utility: cancel orders, close positions, wipe local data
@@ -272,6 +278,7 @@ qwenAIModel/
 ├── .env                    # API secrets (gitignored)
 └── data/                   # Auto-created by main.py (gitignored)
     ├── system_state.json   # Live sensor data from all 5 sources
+    ├── enriched_news.json  # Post-triage articles (relevance, sector ETF, sentiment, tickers)
     ├── trade_journal.json  # Full trade history with <think> reasoning
     ├── portfolio_history.csv # Intraday equity snapshots
     ├── macro_trends.md     # AI-written weekly macro outlook
