@@ -15,6 +15,191 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# Keyword-based News Triage Tables
+# ---------------------------------------------------------------------------
+
+_MACRO_KEYWORDS = frozenset([
+    "fed", "federal reserve", "fomc", "interest rate", "rate cut", "rate hike",
+    "inflation", "cpi", "pce", "deflation", "tariff", "trade war", "trade deal",
+    "gdp", "recession", "treasury", "yield", "yield curve", "unemployment",
+    "jobs report", "payroll", "nonfarm", "fiscal", "monetary policy", "powell",
+    "debt ceiling", "deficit", "budget", "crude oil", "opec", "dollar index",
+    "sanctions", "geopolit", "war", "ukraine", "china trade", "bank crisis",
+])
+
+_SECTOR_KEYWORDS: dict = {
+    "XLK": ["nvidia", "apple", "microsoft", "google", "alphabet", "meta", "amazon",
+             "semiconductor", "chip", "artificial intelligence", " ai ", "software",
+             "cloud", "cybersecurity", "tech stock", "data center"],
+    "XLF": ["bank", "jpmorgan", "goldman sachs", "wells fargo", "citigroup", "morgan stanley",
+             "insurance", "fintech", "credit card", "berkshire", "lending", "loan default",
+             "financial sector"],
+    "XLE": ["exxon", "chevron", "shell", "bp ", "oil price", "natural gas", "refinery",
+             "energy sector", "petroleum", "opec", "pipeline", "crude"],
+    "XLV": ["healthcare", "pharmaceutical", "fda", "drug approval", "vaccine", "pfizer",
+             "moderna", "unitedhealth", "johnson & johnson", "hospital", "biotech", "medicare"],
+    "XLU": ["utility", "electric grid", "power generation", "renewable energy", "solar farm",
+             "wind energy", "nuclear power"],
+    "XLI": ["defense", "boeing", "lockheed", "caterpillar", "raytheon", "industrial",
+             "aerospace", "manufacturing", "infrastructure bill"],
+    "TOTL": ["bond market", "treasury bond", "fixed income", "yield curve", "credit rating",
+              "corporate bond", "junk bond", "municipal bond", "bond fund"],
+    "RLY": ["real asset", "commodity", "tips ", "reit", "real estate", "gold price",
+             "silver price", "inflation hedge"],
+    "SRLN": ["leveraged loan", "floating rate", "credit spread", "senior secured",
+              "high yield loan", "clo "],
+    "GAL": ["global market", "international", "emerging market", "china market",
+             "europe stock", "asia pacific", "yen", "euro", "forex"],
+}
+
+_LARGE_CAP = frozenset([
+    "AAPL", "MSFT", "NVDA", "GOOGL", "GOOG", "AMZN", "META", "TSLA", "AVGO",
+    "JPM", "LLY", "V", "UNH", "XOM", "MA", "COST", "HD", "PG", "JNJ", "BAC",
+    "WFC", "GS", "MS", "CVX", "ABBV", "KO", "PEP", "MRK", "TMO", "CRM", "ORCL",
+    "AMD", "INTC", "QCOM", "TXN", "NFLX", "DIS", "BA", "CAT", "GE", "IBM",
+    "UBER", "PYPL", "SHOP", "SNAP", "SPOT", "ZM", "PLTR", "COIN", "HOOD",
+])
+
+
+_BULL_SIGNALS = frozenset([
+    # Standard financial
+    "bullish", "buying", "long position", "going long", "strong buy", "upgrade",
+    "beat earnings", "beat estimates", "beat expectations", "positive surprise",
+    "optimistic", "rally", "breakout", "outperform", "record high", "all time high",
+    "52-week high", "upside", "uptrend", "accumulate", "overweight", "buy the dip",
+    "buying the dip", "soft landing", "rate cut", "easing", "stimulus",
+    # Reddit-specific
+    "calls ", "yolo", "to the moon", "moon ", "🚀", "tendies", "tendie",
+    "diamond hands", "💎", "apes ", "squeeze", "short squeeze", "gamma squeeze",
+    "printing", "calls printing", "green ", "all green", "green day", "ripping",
+    "mooning", "loading up", "all in", "adding more", "averaging down",
+    "leaps", "deep itm", "strong hands", "never selling", "send it",
+])
+
+_BEAR_SIGNALS = frozenset([
+    # Standard financial
+    "bearish", "selling", "short position", "going short", "downgrade",
+    "missed earnings", "miss estimates", "below expectations", "negative surprise",
+    "pessimistic", "correction", "overvalued", "bubble", "collapse", "downturn",
+    "downtrend", "underperform", "underweight", "sell off", "selloff",
+    "recession", "stagflation", "rate hike", "tightening", "layoffs",
+    "default", "bankruptcy", "insolvency", "delisting", "guidance cut",
+    # Reddit-specific
+    "puts ", "🐻", "to zero", "going to zero", "rekt", "getting rekt",
+    "blood", "bloodbath", "red ", "all red", "red day", "tanking", "tank ",
+    "drilling", "drill ", "gap down", "death cross", "inverse etf",
+    "paper hands", "dumping", "dump ", "cratering", "crater ",
+    "this is the end", "markets are cooked", "sell everything",
+    "rug pull", "rugging", "bagholder", "bag holder", "bag holding",
+    "exit liquidity", "short this", "puts are printing", "buying puts",
+])
+
+
+def _reddit_sentiment_keywords(text: str) -> str:
+    """Keyword-based fallback — instant but context-blind."""
+    lower = text.lower()
+    bull = sum(1 for kw in _BULL_SIGNALS if kw in lower)
+    bear = sum(1 for kw in _BEAR_SIGNALS if kw in lower)
+    if bull > bear:
+        return "BULLISH"
+    if bear > bull:
+        return "BEARISH"
+    return "NEUTRAL"
+
+
+def _reddit_sentiment_batch(posts: list) -> dict:
+    """
+    Single Qwen call to classify sentiment for a small list of Reddit posts.
+    posts: list of {"idx": int, "title": str, "body": str}
+    Returns dict of idx → "BULLISH"|"BEARISH"|"NEUTRAL".
+    Falls back to keyword scoring if the call fails or times out.
+    """
+    if not posts:
+        return {}
+
+    lines = []
+    for p in posts:
+        text = p["title"]
+        if p.get("body"):
+            text += " — " + p["body"][:200]
+        lines.append(f'{p["idx"]}. r/{p.get("subreddit","?")} | {text[:300]}')
+
+    prompt = f"""/no_think
+Classify the market sentiment of each Reddit post. Return a JSON array:
+[{{"idx": 1, "sentiment": "BULLISH"}}, ...]
+
+Options: BULLISH (community expects market/stock to rise), BEARISH (expects decline), NEUTRAL (mixed or unclear)
+Consider Reddit-specific language: calls/puts, tendies, moon/crater, diamond hands/paper hands, rekt, etc.
+
+Posts:
+{chr(10).join(lines)}
+
+Return ONLY the JSON array. No explanation."""
+
+    try:
+        raw = call_ollama(prompt, timeout=config.TRIAGE_OLLAMA_TIMEOUT)
+        clean = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
+        clean = re.sub(r"```(?:json)?\s*", "", clean).strip()
+        array_str = _extract_json_array(clean)
+        if not array_str:
+            raise ValueError("no JSON array found")
+        parsed = json.loads(array_str)
+        result = {}
+        for item in parsed:
+            if not isinstance(item, dict):
+                continue
+            try:
+                idx = int(item["idx"])
+                sentiment = item.get("sentiment", "NEUTRAL")
+                if sentiment not in ("BULLISH", "BEARISH", "NEUTRAL"):
+                    sentiment = "NEUTRAL"
+                result[idx] = sentiment
+            except (KeyError, TypeError, ValueError):
+                continue
+        logger.info(f"Reddit sentiment: Qwen classified {len(result)} posts")
+        return result
+    except Exception as e:
+        logger.warning(f"Reddit sentiment Qwen call failed ({e}) — falling back to keywords")
+        return {p["idx"]: _reddit_sentiment_keywords(p["title"] + " " + p.get("body", "")) for p in posts}
+
+
+def _score_article(title: str, existing_tickers: list, body: str = "") -> tuple:
+    """
+    Returns (relevance_score: int, sector_etf: str|None, tickers: list).
+    Keyword-based — instantaneous, no model call required.
+    Uses body text when available (e.g. Reddit self-posts) for richer matching.
+    """
+    lower = " " + (title + " " + body).lower() + " "
+
+    macro_hits = sum(1 for kw in _MACRO_KEYWORDS if kw in lower)
+
+    best_etf, best_hits = None, 0
+    for etf, keywords in _SECTOR_KEYWORDS.items():
+        hits = sum(1 for kw in keywords if kw in lower)
+        if hits > best_hits:
+            best_hits, best_etf = hits, etf
+
+    # Extract uppercase ticker-like words from the title
+    found = [w for w in re.findall(r'\b[A-Z]{2,5}\b', title) if w in _LARGE_CAP]
+    tickers = list(dict.fromkeys(existing_tickers + found))  # merge, preserve order, dedupe
+
+    # Score
+    if macro_hits >= 2:
+        score = min(10, 7 + macro_hits)
+    elif macro_hits == 1:
+        score = 7
+    elif best_hits >= 1 or tickers:
+        score = 6
+    else:
+        score = 2  # niche / irrelevant
+
+    if tickers:
+        score = min(10, score + 1)
+
+    return score, best_etf, tickers
+
+
+# ---------------------------------------------------------------------------
 # Context / Prompt Builder
 # ---------------------------------------------------------------------------
 
@@ -26,7 +211,7 @@ def _load_json(path: str, default):
         return default
 
 
-def build_prompt(state: dict, portfolio: dict) -> str:
+def build_prompt(state: dict, portfolio: dict, enriched_news: list = None) -> str:
     etf_lines = []
     for symbol, data in state.get("etf_data", {}).items():
         price = f"${data['price']:.2f}" if data.get("price") else "N/A"
@@ -37,27 +222,70 @@ def build_prompt(state: dict, portfolio: dict) -> str:
         signal = data.get("signal", "UNKNOWN")
         etf_lines.append(f"  {symbol}: {price} | RSI: {rsi} | MACD: {macd} | 50MA: {ma50} | 200MA: {ma} | Signal: {signal}")
 
-    headlines = state.get("rss_headlines", [])[:15]
-    headline_lines = []
-    for h in headlines:
-        published = f" ({h['published'][:16]})" if h.get("published") else ""
-        processed = f" [processed: {h['processed_at'][:10]}]" if h.get("processed_at") else ""
-        headline_lines.append(f"  - [{h['source']}]{published} {h['title']}{processed}")
+    # News section: enriched (post-triage) if available, else raw fallback
+    if enriched_news:
+        news_lines = []
+        for art in enriched_news:
+            etf_tag = art.get("sector_etf") or "MACRO"
+            rel = art.get("relevance", 0)
+            tickers_str = ", ".join(art.get("tickers", [])) if art.get("tickers") else "—"
+            sentiment = art.get("sentiment")
+            sentiment_tag = f" | {sentiment}" if sentiment else ""
+            engagement = ""
+            if art.get("subreddit"):
+                engagement = f" | r/{art['subreddit']} ↑{art.get('reddit_score',0)} 💬{art.get('num_comments',0)}"
+            news_lines.append(
+                f"  [{etf_tag} | {rel}/10{sentiment_tag}] {art['summary']}\n"
+                f"    Tickers: {tickers_str}{engagement}"
+            )
+        news_section = (
+            f"ENRICHED NEWS ({len(enriched_news)} articles, relevance ≥ {config.TRIAGE_MIN_RELEVANCE}/10):\n"
+            + (chr(10).join(news_lines) if news_lines else "  No relevant articles passed triage filter.")
+        )
+    else:
+        # Fallback: raw headlines from all sources
+        headlines = state.get("rss_headlines", [])[:15]
+        headline_lines = []
+        for h in headlines:
+            published = f" ({h['published'][:16]})" if h.get("published") else ""
+            headline_lines.append(f"  - [{h['source']}]{published} {h['title']}")
 
-    av_news = state.get("alphavantage_news", [])[:10]
-    av_lines = []
-    for a in av_news:
-        tickers_str = ", ".join(a.get("tickers", [])) if a.get("tickers") else "general"
-        av_lines.append(f"  - [{a['source']}] \"{a['title']}\" (sentiment: {a.get('sentiment', 'N/A')}, tickers: {tickers_str})")
+        av_news = state.get("alphavantage_news", [])[:10]
+        av_lines = []
+        for a in av_news:
+            tickers_str = ", ".join(a.get("tickers", [])) if a.get("tickers") else "general"
+            av_lines.append(f"  - [{a['source']}] \"{a['title']}\" (sentiment: {a.get('sentiment', 'N/A')}, tickers: {tickers_str})")
 
-    newsapi = state.get("newsapi_headlines", [])[:10]
-    newsapi_lines = []
-    for n in newsapi:
-        pub = f" ({n['published'][:16]})" if n.get("published") else ""
-        newsapi_lines.append(f"  - [{n['source']}]{pub} {n['title']}")
+        newsapi = state.get("newsapi_headlines", [])[:10]
+        newsapi_lines = []
+        for n in newsapi:
+            pub = f" ({n['published'][:16]})" if n.get("published") else ""
+            newsapi_lines.append(f"  - [{n['source']}]{pub} {n['title']}")
 
-    reddit_posts = sorted(state.get("reddit_posts", []), key=lambda x: x.get("score", 0), reverse=True)[:10]
-    reddit_lines = [f"  - r/{p['subreddit']}: \"{p['title']}\" (score: {p['score']})" for p in reddit_posts]
+        alpaca_news = state.get("alpaca_news", [])[:10]
+        alpaca_lines = []
+        for a in alpaca_news:
+            tickers_str = ", ".join(a.get("tickers", [])) if a.get("tickers") else ""
+            ticker_tag = f" ({tickers_str})" if tickers_str else ""
+            alpaca_lines.append(f"  - [{a['source']}]{ticker_tag} {a['title']}")
+
+        reddit_posts = sorted(state.get("reddit_posts", []), key=lambda x: x.get("score", 0), reverse=True)[:10]
+        reddit_lines = [f"  - r/{p['subreddit']}: \"{p['title']}\" (score: {p['score']})" for p in reddit_posts]
+
+        news_section = f"""MACRO HEADLINES (RSS):
+{chr(10).join(headline_lines) if headline_lines else "  No headlines available"}
+
+ALPHA VANTAGE NEWS SENTIMENT:
+{chr(10).join(av_lines) if av_lines else "  No Alpha Vantage data available"}
+
+NEWSAPI HEADLINES:
+{chr(10).join(newsapi_lines) if newsapi_lines else "  No NewsAPI data available"}
+
+ALPACA NEWS:
+{chr(10).join(alpaca_lines) if alpaca_lines else "  No Alpaca news available"}
+
+REDDIT PULSE:
+{chr(10).join(reddit_lines) if reddit_lines else "  No Reddit data available"}"""
 
     positions = portfolio.get("positions", {})
     pos_lines = [f"    {sym}: {d['qty']:.4f} shares @ ${d['current_price']:.2f} = ${d['market_value']:.2f}"
@@ -85,17 +313,7 @@ def build_prompt(state: dict, portfolio: dict) -> str:
 ETF TECHNICAL SNAPSHOT:
 {chr(10).join(etf_lines)}
 
-MACRO HEADLINES (RSS):
-{chr(10).join(headline_lines) if headline_lines else "  No headlines available"}
-
-ALPHA VANTAGE NEWS SENTIMENT:
-{chr(10).join(av_lines) if av_lines else "  No Alpha Vantage data available"}
-
-NEWSAPI HEADLINES:
-{chr(10).join(newsapi_lines) if newsapi_lines else "  No NewsAPI data available"}
-
-REDDIT PULSE:
-{chr(10).join(reddit_lines) if reddit_lines else "  No Reddit data available"}
+{news_section}
 
 === PORTFOLIO CONTEXT ===
 Total Value: ${portfolio['total_value']:.2f} | Cash: ${portfolio['cash']:.2f}
@@ -120,13 +338,14 @@ Remember: it is disciplined and correct to output HOLD if conditions do not just
 # Ollama API
 # ---------------------------------------------------------------------------
 
-def call_ollama(prompt: str) -> str:
+def call_ollama(prompt: str, timeout: int = None) -> str:
     payload = {
         "model": config.OLLAMA_MODEL,
         "prompt": prompt,
         "stream": False,
     }
-    response = requests.post(config.OLLAMA_GENERATE_URL, json=payload, timeout=config.OLLAMA_TIMEOUT)
+    t = timeout if timeout is not None else config.OLLAMA_TIMEOUT
+    response = requests.post(config.OLLAMA_GENERATE_URL, json=payload, timeout=t)
     response.raise_for_status()
     return response.json()["response"]
 
@@ -367,6 +586,89 @@ CURRENT ETF DATA:
 
 
 # ---------------------------------------------------------------------------
+# News Triage
+# ---------------------------------------------------------------------------
+
+def triage_news(state: dict) -> list:
+    """
+    Keyword-based news triage — instantaneous, no Ollama call.
+    Scores each article for macro/sector relevance, identifies the most relevant
+    ETF, and extracts large-cap tickers. Filters to TRIAGE_MIN_RELEVANCE.
+    Summaries come from each source's existing data (Alpaca has built-in summaries).
+    """
+    all_articles = []
+    for h in state.get("rss_headlines", [])[:10]:
+        all_articles.append({"title": h["title"], "summary": "", "tickers": [], "body": "", "is_reddit": False})
+    for a in state.get("alphavantage_news", [])[:8]:
+        all_articles.append({"title": a["title"], "summary": "", "tickers": a.get("tickers", []), "body": "", "is_reddit": False})
+    for n in state.get("newsapi_headlines", [])[:8]:
+        all_articles.append({"title": n["title"], "summary": "", "tickers": [], "body": "", "is_reddit": False})
+    for a in state.get("alpaca_news", [])[:8]:
+        all_articles.append({"title": a["title"], "summary": a.get("summary", ""),
+                              "tickers": a.get("tickers", []), "body": "", "is_reddit": False})
+    for p in sorted(state.get("reddit_posts", []), key=lambda x: x.get("score", 0), reverse=True)[:10]:
+        body = p.get("body", "")
+        all_articles.append({
+            "title": p["title"],
+            "summary": body[:300] if body else "",
+            "tickers": [],
+            "body": body,
+            "num_comments": p.get("num_comments", 0),
+            "score": p.get("score", 0),
+            "subreddit": p.get("subreddit", ""),
+            "is_reddit": True,
+        })
+
+    # First pass: score all articles, collect relevant Reddit posts for sentiment batch
+    scored = []
+    reddit_for_sentiment = []
+    for i, art in enumerate(all_articles):
+        score, etf, tickers = _score_article(art["title"], art["tickers"], art["body"])
+        scored.append((score, etf, tickers))
+        if art["is_reddit"] and score >= config.TRIAGE_MIN_RELEVANCE:
+            reddit_for_sentiment.append({
+                "idx": i,
+                "title": art["title"],
+                "body": art.get("body", ""),
+                "subreddit": art.get("subreddit", ""),
+            })
+
+    # Single Qwen batch call for Reddit sentiment (only relevant posts, minimal output)
+    sentiment_map = _reddit_sentiment_batch(reddit_for_sentiment)
+
+    result = []
+    for i, (art, (score, etf, tickers)) in enumerate(zip(all_articles, scored)):
+        if score < config.TRIAGE_MIN_RELEVANCE:
+            continue
+        sentiment = sentiment_map.get(i) if art["is_reddit"] else None
+        entry = {
+            "title": art["title"][:200],
+            "summary": (art["summary"] or art["title"])[:300],
+            "sector_etf": etf,
+            "tickers": tickers,
+            "relevance": score,
+            "sentiment": sentiment,
+        }
+        if art["is_reddit"]:
+            entry["num_comments"] = art.get("num_comments", 0)
+            entry["reddit_score"] = art.get("score", 0)
+            entry["subreddit"] = art.get("subreddit", "")
+        result.append(entry)
+
+    result.sort(key=lambda x: x["relevance"], reverse=True)
+    logger.info(f"Triage: {len(result)}/{len(all_articles)} articles passed (relevance ≥ {config.TRIAGE_MIN_RELEVANCE})")
+    return result
+
+
+def _write_enriched_news(articles: list) -> None:
+    data = {"triage_at": _now_iso(), "articles": articles}
+    tmp = config.ENRICHED_NEWS_FILE + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(data, f, indent=2)
+    os.replace(tmp, config.ENRICHED_NEWS_FILE)
+
+
+# ---------------------------------------------------------------------------
 # Main Entry Point
 # ---------------------------------------------------------------------------
 
@@ -392,9 +694,13 @@ def run() -> None:
         logger.error(f"Could not fetch portfolio from Alpaca: {e}")
         return
 
+    # Triage: classify and filter all raw headlines via Qwen before building the trading prompt
+    enriched_news = triage_news(state)
+    _write_enriched_news(enriched_news)
+
     # Build prompt and call Ollama
-    prompt = build_prompt(state, portfolio)
-    logger.info("Calling Ollama...")
+    prompt = build_prompt(state, portfolio, enriched_news)
+    logger.info("Calling Ollama for trading decision...")
     try:
         raw_response = call_ollama(prompt)
     except Exception as e:
@@ -516,6 +822,22 @@ def run() -> None:
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _extract_json_array(text: str):
+    """Return the first bracket-balanced [...] substring, or None if not found."""
+    start = text.find("[")
+    if start == -1:
+        return None
+    depth = 0
+    for i, ch in enumerate(text[start:], start):
+        if ch == "[":
+            depth += 1
+        elif ch == "]":
+            depth -= 1
+            if depth == 0:
+                return text[start:i + 1]
+    return None
 
 
 def _parse_iso(ts: str) -> datetime:

@@ -384,46 +384,59 @@ with tab3:
             if etf_rows:
                 st.dataframe(pd.DataFrame(etf_rows), width="stretch", hide_index=True)
 
-            # Headlines — 2x2 grid
-            col_tl, col_tr = st.columns(2)
-            with col_tl:
-                st.subheader("RSS Headlines")
-                for h in state.get("rss_headlines", [])[:8]:
-                    published = h.get("published", "")[:16] if h.get("published") else ""
-                    processed = h.get("processed_at", "")[:10] if h.get("processed_at") else ""
-                    date_info = f" `pub: {published}`" if published else ""
-                    date_info += f" `fetched: {processed}`" if processed else ""
-                    st.markdown(f"- **[{h['source']}]**{date_info} {h['title']}")
+            # Enriched News — post-triage view
+            st.subheader("Enriched News")
+            @st.cache_data(ttl=300)
+            def _load_enriched_news(path_str: str):
+                try:
+                    return json.loads(Path(path_str).read_text())
+                except Exception:
+                    return None
 
-            with col_tr:
-                st.subheader("Alpha Vantage News")
-                for a in state.get("alphavantage_news", [])[:8]:
-                    sentiment = a.get("sentiment", "")
-                    s_icon = {"Bullish": "🟢", "Somewhat-Bullish": "🟢", "Bearish": "🔴",
-                              "Somewhat-Bearish": "🔴"}.get(sentiment, "⚪")
-                    tickers = ", ".join(a.get("tickers", [])) if a.get("tickers") else ""
-                    ticker_tag = f" `{tickers}`" if tickers else ""
-                    st.markdown(f"- {s_icon} **[{a['source']}]**{ticker_tag} {a['title']}")
-                if not state.get("alphavantage_news"):
-                    st.info("No Alpha Vantage data. Set ALPHA_VANTAGE_API_KEY in .env")
+            enriched_data = None
+            if Path(config.ENRICHED_NEWS_FILE).exists():
+                enriched_data = _load_enriched_news(config.ENRICHED_NEWS_FILE)
 
-            col_bl, col_br = st.columns(2)
-            with col_bl:
-                st.subheader("NewsAPI Headlines")
-                for n in state.get("newsapi_headlines", [])[:8]:
-                    published = n.get("published", "")[:16] if n.get("published") else ""
-                    date_info = f" `{published}`" if published else ""
-                    st.markdown(f"- **[{n['source']}]**{date_info} {n['title']}")
-                if not state.get("newsapi_headlines"):
-                    st.info("No NewsAPI data. Set NEWS_API_KEY in .env")
+            articles = enriched_data.get("articles") if enriched_data else None
+            if isinstance(articles, list) and articles:
+                triage_ts = enriched_data.get("triage_at", "")[:19].replace("T", " ")
+                st.caption(
+                    f"Triaged at {triage_ts} · {len(articles)} articles passed "
+                    f"relevance ≥ {config.TRIAGE_MIN_RELEVANCE}/10"
+                )
+                for art in articles:
+                    rel = art.get("relevance", 0)
+                    badge = "HIGH" if rel >= 8 else "MED"
+                    etf_tag = art.get("sector_etf") or "MACRO"
+                    tickers_str = ", ".join(art.get("tickers", [])) if art.get("tickers") else "—"
+                    sentiment = art.get("sentiment")
+                    sent_icon = {"BULLISH": "🟢", "BEARISH": "🔴", "NEUTRAL": "⚪"}.get(sentiment, "")
+                    col_meta, col_content = st.columns([1, 5])
+                    with col_meta:
+                        st.markdown(f"**{badge}** `{rel}/10`  \n`{etf_tag}`")
+                        if sentiment:
+                            st.markdown(f"{sent_icon} {sentiment}")
+                    with col_content:
+                        st.markdown(f"**{art.get('summary') or art.get('title', '')}**")
+                        meta_parts = [f"Tickers: {tickers_str}"]
+                        if art.get("subreddit"):
+                            meta_parts.append(f"r/{art['subreddit']} ↑{art.get('reddit_score',0)} 💬{art.get('num_comments',0)}")
+                        meta_parts.append(art.get("title", "")[:80])
+                        st.caption("  ·  ".join(meta_parts))
+                    st.divider()
+            elif enriched_data is not None:
+                st.info("Triage ran but no articles met the relevance threshold. Raw feeds below.")
+            else:
+                st.info("Enriched news not yet available — run main.py to generate.")
 
-            with col_br:
-                st.subheader("Reddit Pulse")
-                posts = sorted(state.get("reddit_posts", []), key=lambda x: x.get("score", 0), reverse=True)[:8]
-                for p in posts:
-                    st.markdown(f"- **r/{p['subreddit']}** (↑{p['score']}) {p['title']}")
-                if not posts:
-                    st.info("No Reddit data. Awaiting API approval.")
+            # Raw feed stats
+            st.subheader("Raw Feed Counts")
+            fs1, fs2, fs3, fs4, fs5 = st.columns(5)
+            fs1.metric("RSS", len(state.get("rss_headlines", [])))
+            fs2.metric("Alpha Vantage", len(state.get("alphavantage_news", [])))
+            fs3.metric("NewsAPI", len(state.get("newsapi_headlines", [])))
+            fs4.metric("Alpaca News", len(state.get("alpaca_news", [])))
+            fs5.metric("Reddit", len(state.get("reddit_posts", [])))
         else:
             st.info("No sensor data yet. Run main.py to populate.")
     else:

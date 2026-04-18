@@ -15,8 +15,6 @@ ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY")
 ALPACA_BASE_URL = "https://paper-api.alpaca.markets/v2"
 
 # --- Reddit ---
-REDDIT_CLIENT_ID = os.getenv("REDDIT_CLIENT_ID")
-REDDIT_CLIENT_SECRET = os.getenv("REDDIT_CLIENT_SECRET")
 REDDIT_USER_AGENT = os.getenv("REDDIT_USER_AGENT", "MacroAgent/1.0")
 
 # --- Target ETFs ---
@@ -51,6 +49,11 @@ MAX_PORTFOLIO_USD = 100_000.0  # paper account default — change to 50.0 when s
 # --- Market Hours (ET) ---
 MARKET_RUN_HOURS = [10, 11, 12, 13, 14, 15]  # ET hours to run pipeline
 
+# --- News Triage ---
+TRIAGE_MIN_RELEVANCE = 6     # articles below this score are filtered before the trading prompt
+TRIAGE_OLLAMA_TIMEOUT = 90   # timeout for Reddit sentiment batch call — fail fast, fall back to keywords
+ALPACA_NEWS_LIMIT = 20       # max articles per Alpaca News API call
+
 # --- File Paths ---
 _BASE = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(_BASE, "data")
@@ -59,4 +62,5 @@ SYSTEM_STATE_FILE = os.path.join(DATA_DIR, "system_state.json")
 MACRO_TRENDS_FILE = os.path.join(DATA_DIR, "macro_trends.md")
 TRADE_JOURNAL_FILE = os.path.join(DATA_DIR, "trade_journal.json")
 PORTFOLIO_HISTORY_FILE = os.path.join(DATA_DIR, "portfolio_history.csv")
+ENRICHED_NEWS_FILE = os.path.join(DATA_DIR, "enriched_news.json")
 LOG_FILE = os.path.join(LOGS_DIR, "agent.log")

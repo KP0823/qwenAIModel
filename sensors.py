@@ -5,7 +5,6 @@ import os
 from datetime import datetime, timedelta, timezone
 
 import feedparser
-import praw
 import requests
 import yfinance as yf
 
@@ -243,32 +242,110 @@ def fetch_newsapi_headlines() -> list:
     return headlines[:15]
 
 
-def fetch_reddit_sentiment() -> list:
-    """Fetch top posts from financial subreddits."""
-    if not config.REDDIT_CLIENT_ID or not config.REDDIT_CLIENT_SECRET:
-        logger.warning("Reddit credentials not set — skipping sentiment fetch")
-        return []
+def fetch_reddit_posts() -> list:
+    """Fetch top posts from financial subreddits via the public JSON API (no credentials needed)."""
+    seen = _load_seen_headlines()
+    now = _now_iso()
     posts = []
+    new_seen = {}
+
+    for sub in config.REDDIT_SUBREDDITS:
+        try:
+            r = requests.get(
+                f"https://www.reddit.com/r/{sub}.json?limit=25&sort=top&t=day",
+                headers={"User-Agent": config.REDDIT_USER_AGENT},
+                timeout=10,
+            )
+            if r.status_code != 200:
+                logger.warning(f"Reddit r/{sub}: HTTP {r.status_code}")
+                continue
+            cutoff = datetime.now(timezone.utc) - timedelta(days=HEADLINE_MAX_AGE_DAYS)
+            for child in r.json()["data"]["children"]:
+                d = child["data"]
+                title = d.get("title", "").strip()
+                if not title:
+                    continue
+                key = hashlib.md5(title.encode()).hexdigest()
+                if key in seen:
+                    continue
+                try:
+                    created = datetime.fromtimestamp(d["created_utc"], tz=timezone.utc)
+                except (TypeError, ValueError, OSError):
+                    continue
+                if created < cutoff:
+                    continue
+                body = d.get("selftext", "").strip() if d.get("is_self") else ""
+                posts.append({
+                    "subreddit": sub,
+                    "title": title,
+                    "body": body[:600],      # text-post body (empty for link posts)
+                    "num_comments": int(d.get("num_comments", 0)),
+                    "score": int(d.get("score", 0)),
+                    "url": d.get("url", ""),
+                    "processed_at": now,
+                })
+                new_seen[key] = {"title": title, "processed_at": now}
+        except Exception as e:
+            logger.error(f"Reddit r/{sub} fetch failed: {e}")
+
+    _save_seen_headlines(seen, new_seen)
+    posts_sorted = sorted(posts, key=lambda x: x["score"], reverse=True)
+    logger.info(f"Reddit: {len(posts_sorted)} new posts")
+    return posts_sorted[:30]
+
+
+def fetch_alpaca_news() -> list:
+    """Fetch ETF-relevant news from the Alpaca News API."""
+    if not config.ALPACA_API_KEY:
+        logger.warning("Alpaca API key not set — skipping Alpaca news")
+        return []
     try:
-        reddit = praw.Reddit(
-            client_id=config.REDDIT_CLIENT_ID,
-            client_secret=config.REDDIT_CLIENT_SECRET,
-            user_agent=config.REDDIT_USER_AGENT,
-        )
-        for sub_name in config.REDDIT_SUBREDDITS:
-            try:
-                subreddit = reddit.subreddit(sub_name)
-                for submission in subreddit.hot(limit=20):
-                    posts.append({
-                        "subreddit": sub_name,
-                        "title": submission.title,
-                        "score": submission.score,
-                    })
-            except Exception as e:
-                logger.error(f"Reddit fetch failed for r/{sub_name}: {e}")
+        from alpaca.data.historical.news import NewsClient
+        from alpaca.data.requests import NewsRequest
+    except ImportError:
+        logger.warning("alpaca.data.historical.news unavailable — skipping")
+        return []
+
+    seen = _load_seen_headlines()
+    now = _now_iso()
+    articles = []
+    new_seen = {}
+
+    try:
+        client = NewsClient(api_key=config.ALPACA_API_KEY, secret_key=config.ALPACA_SECRET_KEY)
+        req = NewsRequest(symbols=",".join(config.TARGET_ETFS), limit=config.ALPACA_NEWS_LIMIT, sort="desc")
+        response = client.get_news(req)
+        items = response.data.get("news", [])
+
+        cutoff = datetime.now(timezone.utc) - timedelta(days=HEADLINE_MAX_AGE_DAYS)
+        for article in items:
+            title = (article.headline or "").strip()
+            if not title:
+                continue
+            key = hashlib.md5(title.encode()).hexdigest()
+            if key in seen:
+                continue
+            created = article.created_at
+            if created:
+                if created.tzinfo is None:
+                    created = created.replace(tzinfo=timezone.utc)
+                if created < cutoff:
+                    continue
+            articles.append({
+                "source": f"Alpaca/{article.source}" if article.source else "Alpaca",
+                "title": title,
+                "summary": article.summary or "",
+                "tickers": list(article.symbols or []),
+                "published": created.isoformat() if created else "",
+                "processed_at": now,
+            })
+            new_seen[key] = {"title": title, "processed_at": now}
     except Exception as e:
-        logger.error(f"Reddit init failed: {e}")
-    return posts
+        logger.error(f"Alpaca news fetch failed: {e}")
+
+    _save_seen_headlines(seen, new_seen)
+    logger.info(f"Alpaca News: {len(articles)} new articles")
+    return articles
 
 
 def _parse_published(date_str: str):
@@ -371,7 +448,10 @@ def run() -> dict:
     newsapi_headlines = fetch_newsapi_headlines()
     newsapi_ok = "ok" if newsapi_headlines else "partial"
 
-    reddit_posts = fetch_reddit_sentiment()
+    alpaca_news = fetch_alpaca_news()
+    alpaca_news_ok = "ok" if alpaca_news else "partial"
+
+    reddit_posts = fetch_reddit_posts()
     reddit_ok = "ok" if reddit_posts else "partial"
 
     state = {
@@ -380,12 +460,14 @@ def run() -> dict:
         "rss_headlines": headlines if headlines else prev_state.get("rss_headlines", []),
         "alphavantage_news": av_news if av_news else prev_state.get("alphavantage_news", []),
         "newsapi_headlines": newsapi_headlines if newsapi_headlines else prev_state.get("newsapi_headlines", []),
-        "reddit_posts": reddit_posts,
+        "alpaca_news": alpaca_news if alpaca_news else prev_state.get("alpaca_news", []),
+        "reddit_posts": reddit_posts if reddit_posts else prev_state.get("reddit_posts", []),
         "api_health": {
             "yfinance": "ok" if yfinance_ok else "partial",
             "rss": rss_ok,
             "alphavantage": av_ok,
             "newsapi": newsapi_ok,
+            "alpaca_news": alpaca_news_ok,
             "reddit": reddit_ok,
             "ollama": _check_ollama_health(),
             "alpaca": _check_alpaca_health(),
