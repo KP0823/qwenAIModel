@@ -25,7 +25,7 @@ def fetch_technical_data(symbol: str) -> dict:
 
         if hist.empty or len(hist) < 15:
             logger.warning(f"{symbol}: insufficient history")
-            return {"symbol": symbol, "price": None, "rsi": None, "ma_50": None, "ma_200": None, "macd": None, "ma_cross": None, "signal": "INSUFFICIENT_DATA", "error": "insufficient history"}
+            return {"symbol": symbol, "price": None, "rsi": None, "ma_50": None, "ma_200": None, "macd": None, "ema_cross_fast": None, "ma_cross": None, "donchian_high": None, "donchian_low": None, "volume": None, "avg_volume_20": None, "volume_ratio": None, "signal": "INSUFFICIENT_DATA", "error": "insufficient history"}
 
         price = float(hist["Close"].iloc[-1])
 
@@ -54,11 +54,29 @@ def fetch_technical_data(symbol: str) -> dict:
         macd_signal_val = float(signal_line.iloc[-1])
         macd_label = "BULLISH" if macd_val > macd_signal_val else "BEARISH"
 
+        # Fast EMA cross (8/21) — more responsive than MACD for early momentum reads
+        ema_8 = hist["Close"].ewm(span=8, adjust=False).mean()
+        ema_21 = hist["Close"].ewm(span=21, adjust=False).mean()
+        ema_cross_fast = "BULL" if float(ema_8.iloc[-1]) > float(ema_21.iloc[-1]) else "BEAR"
+
         # Golden/Death cross (50MA vs 200MA)
         if ma_50 and ma_200:
             cross = "GOLDEN_CROSS" if ma_50 > ma_200 else "DEATH_CROSS"
         else:
             cross = None
+
+        # Donchian Channels (20-period high/low) — breakout reference
+        donchian_high = round(float(hist["High"].tail(20).max()), 2)
+        donchian_low = round(float(hist["Low"].tail(20).min()), 2)
+
+        # Volume vs 20-day average
+        try:
+            vol = int(hist["Volume"].iloc[-1])
+            avg_vol_20 = int(hist["Volume"].tail(20).mean())
+            vol_ratio = round(vol / avg_vol_20, 2) if avg_vol_20 > 0 else None
+        except Exception:
+            vol = avg_vol_20 = None
+            vol_ratio = None
 
         # Signal
         if ma_200 is None:
@@ -86,13 +104,19 @@ def fetch_technical_data(symbol: str) -> dict:
             "ma_50": round(ma_50, 2) if ma_50 else None,
             "ma_200": round(ma_200, 2) if ma_200 else None,
             "macd": macd_label,
+            "ema_cross_fast": ema_cross_fast,
             "ma_cross": cross,
+            "donchian_high": donchian_high,
+            "donchian_low": donchian_low,
+            "volume": vol,
+            "avg_volume_20": avg_vol_20,
+            "volume_ratio": vol_ratio,
             "signal": signal,
             "fetched_at": _now_iso(),
         }
     except Exception as e:
         logger.error(f"{symbol} technical fetch failed: {e}")
-        return {"symbol": symbol, "price": None, "rsi": None, "ma_50": None, "ma_200": None, "macd": None, "ma_cross": None, "signal": "ERROR", "error": str(e)}
+        return {"symbol": symbol, "price": None, "rsi": None, "ma_50": None, "ma_200": None, "macd": None, "ema_cross_fast": None, "ma_cross": None, "donchian_high": None, "donchian_low": None, "volume": None, "avg_volume_20": None, "volume_ratio": None, "signal": "ERROR", "error": str(e)}
 
 
 def fetch_rss_headlines() -> list:

@@ -364,25 +364,55 @@ with tab3:
                 icon = status_icon.get(status, "❓")
                 col.metric(service.capitalize(), f"{icon} {status}")
 
-            # ETF table
+            # ETF Technical Snapshot — split into two tables for readability
             st.subheader("ETF Technical Snapshot")
-            etf_rows = []
+            momentum_rows = []
+            levels_rows = []
             for symbol, data in state.get("etf_data", {}).items():
                 price = f"${data['price']:.2f}" if data.get("price") else "N/A"
-                rsi = f"{data['rsi']:.1f}" if data.get("rsi") is not None else "N/A"
-                ma = f"${data['ma_200']:.2f}" if data.get("ma_200") else "N/A"
-                etf_rows.append({
-                    "ETF": symbol,
-                    "Price": price,
-                    "RSI (14)": rsi,
-                    "MACD": data.get("macd", "N/A"),
-                    "50-Day MA": f"${data['ma_50']:.2f}" if data.get("ma_50") else "N/A",
-                    "200-Day MA": ma,
-                    "MA Cross": data.get("ma_cross", "N/A"),
-                    "Signal": data.get("signal", "N/A"),
+
+                rsi_val = data.get("rsi")
+                if rsi_val is not None:
+                    rsi_icon = "🔴" if rsi_val >= 70 else ("🟢" if rsi_val <= 30 else "⚪")
+                    rsi_str = f"{rsi_icon} {rsi_val:.1f}"
+                else:
+                    rsi_str = "N/A"
+
+                ema = data.get("ema_cross_fast")
+                ema_str = ("🟢 BULL" if ema == "BULL" else "🔴 BEAR") if ema else "N/A"
+
+                macd = data.get("macd")
+                macd_str = ("🟢 BULLISH" if macd == "BULLISH" else "🔴 BEARISH") if macd else "N/A"
+
+                vr = data.get("volume_ratio")
+                vol_str = (f"🔥 {vr:.2f}x" if vr >= 1.5 else f"{vr:.2f}x") if vr else "N/A"
+
+                cross = data.get("ma_cross")
+                cross_str = ("✨ GOLDEN" if cross == "GOLDEN_CROSS" else "💀 DEATH") if cross else "N/A"
+
+                momentum_rows.append({
+                    "ETF":        symbol,
+                    "Price":      price,
+                    "RSI (14)":   rsi_str,
+                    "EMA (8/21)": ema_str,
+                    "MACD":       macd_str,
+                    "Vol Ratio":  vol_str,
+                    "Signal":     data.get("signal", "N/A"),
                 })
-            if etf_rows:
-                st.dataframe(pd.DataFrame(etf_rows), width="stretch", hide_index=True)
+                levels_rows.append({
+                    "ETF":          symbol,
+                    "DC High (20)": f"${data['donchian_high']:.2f}" if data.get("donchian_high") else "N/A",
+                    "DC Low (20)":  f"${data['donchian_low']:.2f}" if data.get("donchian_low") else "N/A",
+                    "50-Day MA":    f"${data['ma_50']:.2f}" if data.get("ma_50") else "N/A",
+                    "200-Day MA":   f"${data['ma_200']:.2f}" if data.get("ma_200") else "N/A",
+                    "MA Cross":     cross_str,
+                })
+
+            if momentum_rows:
+                st.caption("Momentum & Signals")
+                st.dataframe(pd.DataFrame(momentum_rows), use_container_width=True, hide_index=True)
+                st.caption("Price Levels")
+                st.dataframe(pd.DataFrame(levels_rows), use_container_width=True, hide_index=True)
 
             # Enriched News — post-triage view
             st.subheader("Enriched News")

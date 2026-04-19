@@ -219,8 +219,15 @@ def build_prompt(state: dict, portfolio: dict, enriched_news: list = None) -> st
         ma = f"${data['ma_200']:.2f}" if data.get("ma_200") else "N/A"
         ma50 = f"${data['ma_50']:.2f}" if data.get("ma_50") else "N/A"
         macd = data.get("macd", "N/A")
+        ema_fast = data.get("ema_cross_fast", "N/A")
         signal = data.get("signal", "UNKNOWN")
-        etf_lines.append(f"  {symbol}: {price} | RSI: {rsi} | MACD: {macd} | 50MA: {ma50} | 200MA: {ma} | Signal: {signal}")
+        dc_high = f"${data['donchian_high']:.2f}" if data.get("donchian_high") else "N/A"
+        dc_low = f"${data['donchian_low']:.2f}" if data.get("donchian_low") else "N/A"
+        vol_str = f" | Vol: {data['volume_ratio']:.2f}x avg" if data.get("volume_ratio") else ""
+        etf_lines.append(
+            f"  {symbol}: {price} | RSI: {rsi} | EMA(8/21): {ema_fast} | MACD: {macd}"
+            f" | 50MA: {ma50} | 200MA: {ma} | DC(20): {dc_low}–{dc_high}{vol_str} | Signal: {signal}"
+        )
 
     # News section: enriched (post-triage) if available, else raw fallback
     if enriched_news:
